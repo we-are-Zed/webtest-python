@@ -58,7 +58,7 @@ class Webtest(threading.Thread):
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
         self.screen_shot_count = 0
-        self.screen_shot_record_round = 50
+        self.screen_shot_record_round = 50  # 每隔多少次记录一次截图
         self.same_url_count = 0
         self.current_url = "111"
         self.restart_interval = settings.restart_interval

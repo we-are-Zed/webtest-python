@@ -33,7 +33,7 @@ class Settings:
         self.agent = None
 
     def load_settings(self) -> None:
-        with open(self.settings_path, 'r') as f:
+        with open(self.settings_path, 'r', encoding="utf-8") as f:
             settings_data = yaml.safe_load(f)
             if self.output_path is None:
                 self.output_path = settings_data['default_output_path']

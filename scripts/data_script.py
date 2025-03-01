@@ -84,7 +84,7 @@ def get_bugs_filter(bug_path):
 
 
 if __name__ == '__main__':
-    mas = 'D:\Projects\webtest-python\webtest_output/result-2'
+    mas = 'D:\projects\webtest-python\webtest_output/result'
     for item in os.scandir(mas):
         if item.is_dir():
             session_path = os.path.join(item.path, 'output_data/newest.json')

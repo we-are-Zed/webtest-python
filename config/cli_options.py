@@ -17,7 +17,7 @@ class CliOptions:
                                       "in settings file")
         self.parser.add_argument("--enable_screen_shot", type=bool, default=None,
                                  help="enable_screen_shot, default=<default_enable_screen_shot> in settings file")
-        self.parser.add_argument("--settings", type=str, default="settings_my.yaml",
+        self.parser.add_argument("--settings", type=str, default="settings.yaml",
                                  help="path of settings file, default=%(default)s")
         self.parser.add_argument("--profile", type=str, default=None,
                                  help="profile to run, default=<default_profile> in settings file")
