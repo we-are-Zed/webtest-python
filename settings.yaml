@@ -21,8 +21,8 @@ profiles:
       - www.github.com
       - github.com
     browser_arguments:
-      - --window-size=1280,1000
-    #      - --headless
+#      - --window-size=1280,1000
+          - --headless
     action_detector:   # 可执行动作的种类，例如点击事件、输入事件、选择事件
       module: action.detector.combination_detector
       class: CombinationDetector
@@ -37,8 +37,8 @@ profiles:
       module: state.impl.action_set_with_execution_times_state
       class: ActionSetWithExecutionTimesState
     agent:
-      module: agent.impl.my_agent
-      class: my_agent
+      module: agent.impl.rag_llm_agent
+      class: rag_llm_agent
       params:
         agent_type: LLM
         alpha: 1
