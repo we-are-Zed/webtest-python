@@ -36,36 +36,18 @@ class LLMInterface:
             )
             print("SSH 连接成功")
 
-            channel = ssh.invoke_shell()
+            command = f'{self.ollama_cmd} run {self.llm_name} "{prompt}"'
+            command_test = f'{self.ollama_cmd} list'
+            print("执行命令：", command)
 
-            import time
-            time.sleep(1)
-            while channel.recv_ready():
-                initial_output = channel.recv(1024).decode('utf-8')
-                print("清除初始输出:", initial_output)
+            # 使用 exec_command 执行一次性命令
+            stdin, stdout, stderr = ssh.exec_command(command, get_pty=True)
+            exit_status = stdout.channel.recv_exit_status()  # 阻塞直到远程进程结束
+            output = stdout.read().decode('utf-8', errors='ignore')
+            error = stderr.read().decode('utf-8', errors='ignore')
 
-            # 命令示例：ollama run <模型名称> "<prompt>"
-            command = f'{self.ollama_cmd} run {self.llm_name}'
-            channel.send(f'{command}\n'.encode('utf-8'))
-            print("启动模型：", command)
-            channel.settimeout(5.0)
-
-            command = f'{prompt}\n'
-            print("发送命令：", command)
-            channel.send(f'{command}\n'.encode('utf-8'))
-
-            output_lines = []
-            while True:
-                try:
-                    resp = channel.recv(1024).decode('utf-8')
-                    if not resp:
-                        break
-                    output_lines.append(resp)
-                except Exception as e:
-                    print("读取远程输出时出现异常:", e)
-                    break
-
-            output = "".join(output_lines)
+            if error:
+                print("服务器上执行 ollama 时出错：", error)
             return output.strip()
 
         except Exception as e:
@@ -75,10 +57,8 @@ class LLMInterface:
         finally:
             ssh.close()
 
-# 根据当前HTML检索相关文档
 class RetrieverInterface:
     def __init__(self, params):
-        # 初始化检索器，例如加载索引等
         pass
 
     def retrieve(self, html: str) -> str:
@@ -92,21 +72,19 @@ class rag_llm_agent(Agent):
 
     def get_action(self, web_state: WebState, html: str) -> WebAction:
         action_list = web_state.get_action_list()
-        if not action_list:
-            raise Exception("当前状态没有可执行的动作。")
+        limited_actions = action_list[:10]
 
         prompt = (
             "作为一位专业的移动应用测试专家，请根据以下GUI上下文信息生成下一步操作建议。\n"
             "【GUI上下文信息】\n"
-            f"网页HTML: {html}\n"
-            f"可执行动作列表: {action_list}\n"
-            "请结合以上信息，进行功能感知的决策，并输出格式为单一的数字N，没有其他字符，其中N为建议的动作序号。\n"
+            f"可执行动作列表: {limited_actions}\n"
+            "请结合以上信息，输出建议的动作序号，输出格式为单一的数字N，没有其他字符，其中N为建议的动作序号。\n"
             "例如，如果认为第1个动作最合适，则输出数字1。"
         )
 
         prompt_test = "1+1等于几？"
 
-        reasoning_output = self.llm.generate(prompt_test)
+        reasoning_output = self.llm.generate(prompt)
         print("推理结果：", reasoning_output)
 
         # 5. 解析 LLM 的输出，提取出选择的动作编号
@@ -116,18 +94,28 @@ class rag_llm_agent(Agent):
         return action_list[chosen_index]
 
     def parse_reasoning_output(self, output: str, num_actions: int) -> int:
-        # 如果输出中包含 </think>，则只保留其后的内容
+        # 内部定义一个函数，用于去除 ANSI 转义序列
+        def remove_ansi(text: str) -> str:
+            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+            return ansi_escape.sub('', text)
+
+        # 去除思考过程
         if "</think>" in output:
             output = output.split("</think>")[-1].strip()
-            print("截断后的输出：", output)
 
-        match = re.search(r"选择第(\d+)个动作", output)
+        output = remove_ansi(output).strip()
+
+        print("截断后的输出：", repr(output))
+
+        # 匹配第一个出现的数字
+        match = re.search(r"\d+", output)
         if match:
-            index = int(match.group(1)) - 1  # 将1开始的编号转换为索引
+            print("解析成功，匹配到的数字：", match.group(0))
+            index = int(match.group(0)) - 1  # 将1开始的编号转换为0索引
             if 0 <= index < num_actions:
                 return index
 
-        print("解析失败")
+        print("解析失败，随机选择一个动作。")
         return random.randint(0, num_actions - 1)
 
 def main():
