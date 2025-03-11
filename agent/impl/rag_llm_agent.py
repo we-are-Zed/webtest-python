@@ -1,6 +1,10 @@
 import os
 import random
 import re
+
+from action.impl.click_action import ClickAction
+from action.impl.random_input_action import RandomInputAction
+from action.impl.random_select_action import RandomSelectAction
 from action.web_action import WebAction
 from agent.agent import Agent
 from state.web_state import WebState
@@ -70,30 +74,59 @@ class rag_llm_agent(Agent):
     def __init__(self, params):
         self.llm = LLMInterface(params)
 
+    def format_action_info(self, action):
+        if isinstance(action, ClickAction):
+            operation_name = "Click"  # 或 "ClickAction"
+        elif isinstance(action, RandomInputAction):
+            operation_name = "Input"  # 或 "TextInput"
+        elif isinstance(action, RandomSelectAction):
+            operation_name = "Select"  # 或 "SelectOption"
+        else:
+            operation_name = "UnknownOperation"
+
+        widget_text = action.text if action.text else "UnnamedWidget"
+
+        return f"Widget: '{widget_text}', can perform {operation_name}."
+
     def get_action(self, web_state: WebState, html: str) -> WebAction:
         action_list = web_state.get_action_list()
-        limited_actions = action_list[:10]
+        descriptions = [f"{i}. " + self.format_action_info(a) for i, a in enumerate(action_list)]
 
-        prompt = (
-            "作为一位专业的移动应用测试专家，请根据以下GUI上下文信息生成下一步操作建议。\n"
-            "【GUI上下文信息】\n"
-            f"可执行动作列表: {limited_actions}\n"
-            "请结合以上信息，输出建议的动作序号，输出格式为单一的数字N，没有其他字符，其中N为建议的动作序号。\n"
-            "例如，如果认为第1个动作最合适，则输出数字1。"
-        )
+        app_name = "github"
+
+        action_descriptions_str = "\n".join(descriptions)
+
+        prompt = f"""
+        We want to test the "{app_name}" App.
+
+        The current page is.
+
+        The widgets which can be operated are:
+        {action_descriptions_str}
+
+        What operation is required?
+        (Operation: [click / double-click / long press / scroll / input / select] + <Widget Name>)
+
+        please return a single number corresponding to the action index from the above list.
+        If the selected action requires text input, please return the index followed by a colon and the input text.
+        For example, if you choose the first action, simply return "1";
+        if you choose an input action and want to provide "Hello" as input, return "2:Hello".
+        
+        Do not output any additional text or explanation; strictly follow the requested format.
+        """.strip()
 
         prompt_test = "1+1等于几？"
 
-        reasoning_output = self.llm.generate(prompt)
-        print("推理结果：", reasoning_output)
+        output = self.llm.generate(prompt)
+        print("llm返回结果：", output)
 
-        # 5. 解析 LLM 的输出，提取出选择的动作编号
-        chosen_index = self.parse_reasoning_output(reasoning_output, len(action_list))
+        # 解析 LLM 的输出，提取出选择的动作编号
+        chosen_index = self.parse_output(output, len(action_list))
         print("选择的动作编号：", chosen_index)
 
         return action_list[chosen_index]
 
-    def parse_reasoning_output(self, output: str, num_actions: int) -> int:
+    def parse_output(self, output: str, num_actions: int) -> int:
         # 内部定义一个函数，用于去除 ANSI 转义序列
         def remove_ansi(text: str) -> str:
             ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
@@ -105,13 +138,13 @@ class rag_llm_agent(Agent):
 
         output = remove_ansi(output).strip()
 
-        print("截断后的输出：", repr(output))
+        print("处理后的输出：", repr(output))
 
         # 匹配第一个出现的数字
         match = re.search(r"\d+", output)
         if match:
             print("解析成功，匹配到的数字：", match.group(0))
-            index = int(match.group(0)) - 1  # 将1开始的编号转换为0索引
+            index = int(match.group(0))
             if 0 <= index < num_actions:
                 return index
 
