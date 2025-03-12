@@ -9,6 +9,12 @@ from action.web_action import WebAction
 from agent.agent import Agent
 from state.web_state import WebState
 import paramiko
+from openai import OpenAI
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+
 
 # 与大型语言模型（LLM）交互
 class LLMInterface:
@@ -27,7 +33,27 @@ class LLMInterface:
         self.ollama_cmd = params.get("ollama_path", "ollama")
         self.llm_name = params.get("llm_name", "deepseek-r1:14b")
 
-    def generate(self, prompt: str) -> str:
+    def gpt(self, prompt: str) -> str:
+        client = OpenAI(
+            base_url="https://api.gptsapi.net/v1",
+            api_key="sk-vGn89b99eeaff057a82b9a50da1486c135a3b862311kQTVa"
+        )
+
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"{prompt}",
+                }
+            ]
+        )
+
+        print(response.choices[0].message.content)
+
+        return response.choices[0].message.content
+
+    def local_llm(self, prompt: str) -> str:
         # 1. 初始化SSH连接
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -61,18 +87,51 @@ class LLMInterface:
         finally:
             ssh.close()
 
+
 class RetrieverInterface:
     def __init__(self, params):
         pass
 
-    def retrieve(self, html: str) -> str:
-        # 根据html内容进行检索，返回相关文档的内容
-        # 目前返回一个示例字符串
-        return "检索到的相关文档示例内容。"
+    def retrieve(self, prompt: str) -> str:
+        # 1. 加载数据
+        loader = PyPDFLoader(r"C:\Users\ASUS\Desktop\Reasoning+RAG Web Exploration\Make LLM a Testing Expert Bringing Human-like Interaction to.pdf")
+
+        pages = loader.load_and_split()
+
+        # 2. 知识切片：将文档分割成均匀的块，每个块是一段原始文本
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=500,
+            chunk_overlap=50,
+        )
+        docs = text_splitter.split_documents(pages)
+        print(len(docs))
+
+        # 3. 利用embedding模型对每个文本片段进行向量化，并储存到向量数据库中
+        embed_model = OpenAIEmbeddings(openai_api_key="")
+        vectorstore = Chroma.from_documents(documents=docs, embedding=embed_model, collection_name="openai_embed")
+
+        # 4. 通过向量相似度检索和问题最相关的k个文档
+        query = prompt
+        result = vectorstore.similarity_search(query, top_k=1)
+
+        # 5. 原始query与检索得到的文本组合起来输入语言模型，得到最终的回答
+        source_knowledge = "\n".join([x.page_content for x in result])
+
+        augmented_prompt = f"""
+        Using the contexts below, answer the query.
+        
+        context:{source_knowledge}
+        
+        query: {query}
+        """
+
+        return augmented_prompt
+
 
 class rag_llm_agent(Agent):
     def __init__(self, params):
         self.llm = LLMInterface(params)
+        self.retriever = RetrieverInterface(params)
 
     def format_action_info(self, action):
         if isinstance(action, ClickAction):
@@ -115,9 +174,9 @@ class rag_llm_agent(Agent):
         Do not output any additional text or explanation; strictly follow the requested format.
         """.strip()
 
-        prompt_test = "1+1等于几？"
+        augmented_prompt = self.retriever.retrieve(prompt)
 
-        output = self.llm.generate(prompt)
+        output = self.llm.gpt(augmented_prompt)
         print("llm返回结果：", output)
 
         # 解析 LLM 的输出，提取出选择的动作编号
@@ -151,16 +210,20 @@ class rag_llm_agent(Agent):
         print("解析失败，随机选择一个动作。")
         return random.randint(0, num_actions - 1)
 
+
 def main():
+    # 用于测试 LLM 接口
     params = {}
     llm = LLMInterface(params)
+    retriever = RetrieverInterface(params)
     prompt = "1+1等于几？"
-    reasoning_output = llm.generate(prompt)
+    augmented_prompt = retriever.retrieve(prompt)
+    print("增强后的提示：", augmented_prompt)
+    reasoning_output = llm.gpt(augmented_prompt)
     if "</think>" in reasoning_output:
         reasoning_output = reasoning_output.split("</think>")[-1].strip()
         print("截断后的输出：", reasoning_output)
     print("推理结果：", reasoning_output)
-
 
 
 if __name__ == '__main__':
