@@ -14,6 +14,8 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
+import requests
+from langchain.embeddings.base import Embeddings  # 注意 langchain 版本较新时位置在 langchain.embeddings.base
 
 
 # 与大型语言模型（LLM）交互
@@ -88,6 +90,72 @@ class LLMInterface:
             ssh.close()
 
 
+class SiliconFlowEmbeddings(Embeddings):
+    """
+    自定义的 Embeddings 类，用来调用 SiliconFlow API 获取文本向量。
+    """
+
+    def __init__(
+            self,
+            token: str,
+            url: str = "https://api.siliconflow.cn/v1/embeddings",
+            model: str = "BAAI/bge-large-zh-v1.5"
+    ):
+        """
+        参数:
+        - token: 你的 SiliconFlow API Token
+        - url: SiliconFlow Embeddings API 的地址 (默认为 v1/embeddings)
+        - model: 使用的模型名称 (默认为 'BAAI/bge-large-zh-v1.5')
+        """
+        super().__init__()
+        self.token = token
+        self.url = url
+        self.model = model
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        """
+        批量处理多个文档（事实上这里是循环单条请求，如果你想要批量请求，可以自行改写为一次性传 texts）
+        返回一个二维列表，每个元素是对应文本的 embedding 向量。
+        """
+        embeddings = []
+        for text in texts:
+            embedding = self._get_embedding(text)
+            embeddings.append(embedding)
+        return embeddings
+
+    def embed_query(self, text: str) -> list[float]:
+        """
+        处理单个查询文本的向量生成，用于例如 QA 场景下的 query embedding。
+        """
+        return self._get_embedding(text)
+
+    def _get_embedding(self, text: str) -> list[float]:
+        """真正调用 SiliconFlow API 获取某个文本的向量。"""
+        payload = {
+            "model": self.model,
+            "input": text,
+            "encoding_format": "float"
+        }
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json"
+        }
+        response = requests.post(self.url, json=payload, headers=headers)
+        response.raise_for_status()  # 如果想在请求出错时抛出异常
+        data = response.json()
+
+        # 注意：以下解析逻辑要与实际返回的 JSON 对应，比如:
+        # {
+        #   "data": [
+        #     {
+        #       "embedding": [...]
+        #     }
+        #   ]
+        # }
+        #
+        # 如果 SiliconFlow 的返回结构不同，请务必根据实际调整
+        return data["data"][0]["embedding"]
+
 class RetrieverInterface:
     def __init__(self, params):
         pass
@@ -107,12 +175,14 @@ class RetrieverInterface:
         print(len(docs))
 
         # 3. 利用embedding模型对每个文本片段进行向量化，并储存到向量数据库中
-        embed_model = OpenAIEmbeddings(openai_api_key="")
-        vectorstore = Chroma.from_documents(documents=docs, embedding=embed_model, collection_name="openai_embed")
+        # embed_model = OpenAIEmbeddings(openai_api_key="")
+        # vectorstore = Chroma.from_documents(documents=docs, embedding=embed_model, collection_name="openai_embed")
+        embed_model = SiliconFlowEmbeddings(token="sk-esaaumvchjupuotzcybqofgbiuqbfmhwpvfwiyefacxznnpz")
+        vectorstore = Chroma.from_documents(documents=docs, embedding=embed_model, collection_name="siliconflow_embed")
 
         # 4. 通过向量相似度检索和问题最相关的k个文档
         query = prompt
-        result = vectorstore.similarity_search(query, top_k=1)
+        result = vectorstore.similarity_search(query, k=1)
 
         # 5. 原始query与检索得到的文本组合起来输入语言模型，得到最终的回答
         source_knowledge = "\n".join([x.page_content for x in result])
@@ -216,7 +286,7 @@ def main():
     params = {}
     llm = LLMInterface(params)
     retriever = RetrieverInterface(params)
-    prompt = "1+1等于几？"
+    prompt = "how to design prompt for LLM when we are using LLM for GUI test"
     augmented_prompt = retriever.retrieve(prompt)
     print("增强后的提示：", augmented_prompt)
     reasoning_output = llm.gpt(augmented_prompt)
