@@ -21,15 +21,106 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 try:
     from langchain_chroma import Chroma
 except ImportError:
-    from langchain_community.vectorstores import Chroma
+    try:
+        from langchain_community.vectorstores import Chroma
+    except ImportError:
+        from langchain.vectorstores import Chroma
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning, module="langchain")
 
 from langchain.embeddings.base import Embeddings
 from langchain.schema import Document
 
 
+def manage_vectorstore(vectorstore, max_entries=None, cleanup_ratio=0.8, kb_name="KB", 
+                      close_connection=False, verbose=False):
+    """
+    🚀 统一的向量存储管理函数 - 合并清理和连接管理功能
+    
+    Args:
+        vectorstore: 向量存储对象
+        max_entries: 最大记录数，None表示不清理记录
+        cleanup_ratio: 清理后保留的比例（0.8 = 保留80%）
+        kb_name: 知识库名称（用于日志）
+        close_connection: 是否关闭连接
+        verbose: 是否显示详细信息
+    
+    Returns:
+        bool: 是否执行了清理操作
+    """
+    if vectorstore is None:
+        return False
+    
+    cleaned = False
+    
+    # 1. 记录清理功能
+    if max_entries is not None:
+        try:
+            if hasattr(vectorstore, '_collection'):
+                current_count = vectorstore._collection.count()
+                if current_count > max_entries:
+                    if verbose:
+                        print(f"🧹 {kb_name} cleanup: {current_count} > {max_entries}")
+                    
+                    # 计算删除数量
+                    target_count = int(max_entries * cleanup_ratio)
+                    excess_count = current_count - target_count
+                    
+                    try:
+                        # 获取所有记录的ID和时间戳
+                        all_data = vectorstore._collection.get(include=['metadatas'])
+                        
+                        # 按时间戳排序
+                        records_with_ids = []
+                        for i, metadata in enumerate(all_data['metadatas']):
+                            timestamp = metadata.get('timestamp', '1970-01-01T00:00:00')
+                            records_with_ids.append((timestamp, all_data['ids'][i]))
+                        
+                        # 删除最旧的记录
+                        records_with_ids.sort(key=lambda x: x[0])
+                        ids_to_delete = [record[1] for record in records_with_ids[:excess_count]]
+                        
+                        if ids_to_delete:
+                            vectorstore._collection.delete(ids=ids_to_delete)
+                            if verbose:
+                                print(f"🧹 {kb_name}: Deleted {len(ids_to_delete)} records (kept {target_count})")
+                            cleaned = True
+                    
+                    except Exception as delete_error:
+                        if verbose:
+                            print(f"⚠️ {kb_name}: Delete failed: {delete_error}")
+                
+                elif verbose and current_count > max_entries * 0.8:
+                    print(f"📊 {kb_name}: {current_count} records (limit: {max_entries})")
+                    
+        except Exception as e:
+            if verbose:
+                print(f"Error checking {kb_name} records: {e}")
+    
+    # 2. 连接关闭功能
+    if close_connection:
+        try:
+            if verbose:
+                print(f"🔌 Closing {kb_name} connections...")
+            
+            # 关闭Chroma客户端
+            if hasattr(vectorstore, '_client') and vectorstore._client:
+                vectorstore._client.reset()
+            
+            # 清理集合引用
+            if hasattr(vectorstore, '_collection'):
+                del vectorstore._collection
+            
+        except Exception as e:
+            if verbose:
+                print(f"Error closing {kb_name} connections: {e}")
+    
+    return cleaned
+
+
 # 与大型语言模型（LLM）交互 - 使用SiliconFlow API
 class LLMInterface:
-    def __init__(self, params):
+    def __init__(self, params, verbose=False):
         """
         使用SiliconFlow API进行LLM交互
         """
@@ -39,13 +130,15 @@ class LLMInterface:
         self.enable_thinking = params.get("enable_thinking", False)
         self.max_tokens = params.get("max_tokens", 1024)
         self.temperature = params.get("temperature", 0.7)
+        self.verbose = verbose  # 添加 verbose 属性
         
-        # 🆔 为每个LLM实例生成唯一会话标识符
+        # 为每个LLM实例生成唯一会话标识符
         import uuid
         self.session_id = str(uuid.uuid4())
         self.test_session_counter = 0  # 测试会话计数器
         
-        print(f"🆔 LLM会话ID: {self.session_id}")
+        if self.verbose:
+            print(f"LLM会话ID: {self.session_id}")
 
     def reset_session(self):
         """
@@ -56,17 +149,18 @@ class LLMInterface:
         self.session_id = str(uuid.uuid4())
         self.test_session_counter += 1
         
-        print(f"🔄 LLM会话重置:")
-        print(f"  旧会话ID: {old_session_id}")
-        print(f"  新会话ID: {self.session_id}")
-        print(f"  测试计数: {self.test_session_counter}")
+        if self.verbose:
+            print(f"LLM会话重置:")
+            print(f"  旧会话ID: {old_session_id}")
+            print(f"  新会话ID: {self.session_id}")
+            print(f"  测试计数: {self.test_session_counter}")
 
     def _build_isolation_prompt(self, user_prompt: str) -> str:
         """
         构建包含隔离信息的提示词，确保测试独立性
         """
         isolation_header = f"""
-[🔒 测试隔离声明]
+[测试隔离声明]
 - 这是一个全新的独立测试会话
 - 会话ID: {self.session_id}
 - 测试编号: {self.test_session_counter}
@@ -74,7 +168,7 @@ class LLMInterface:
 - 请基于当前提供的信息独立做出决策
 - 不要参考之前测试的结果或经验
 
-[📋 当前测试任务]
+[当前测试任务]
 {user_prompt}
 
 请严格基于上述信息进行推理和决策，确保测试的独立性和一致性。
@@ -89,12 +183,12 @@ class LLMInterface:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            # 🆔 添加会话标识符到请求头
+            # 添加会话标识符到请求头
             "X-Session-ID": self.session_id,
             "X-Test-Session": str(self.test_session_counter)
         }
         
-        # 🔒 构建包含隔离信息的提示词
+        # 构建包含隔离信息的提示词
         isolated_prompt = self._build_isolation_prompt(prompt)
         
         payload = {
@@ -116,7 +210,7 @@ class LLMInterface:
             "top_k": 50,
             "frequency_penalty": 0.5,
             "n": 1,
-            # 🎲 添加随机种子确保每次调用的独立性
+            # 添加随机种子确保每次调用的独立性
             "seed": hash(self.session_id + str(self.test_session_counter)) % 2147483647
         }
         
@@ -138,7 +232,8 @@ class LLMInterface:
             content = message.get("content", "")
             reasoning = message.get("reasoning_content", "")
             
-            print(f"LLM响应 [会话:{self.session_id[:8]}]: {content}")
+            if self.verbose:
+                print(f"LLM响应 [会话:{self.session_id[:8]}]: {content}")
             if reasoning:
                 print(f"LLM推理过程 [会话:{self.session_id[:8]}]: {reasoning[:200]}...")  # 只打印前200个字符
                 
@@ -148,7 +243,8 @@ class LLMInterface:
             }
             
         except Exception as e:
-            print(f"LLM调用失败 [会话:{self.session_id[:8]}]: {e}")
+            if self.verbose:
+                print(f"LLM调用失败 [会话:{self.session_id[:8]}]: {e}")
             return {
                 "content": "模型调用出现错误，请稍后重试。",
                 "reasoning": ""
@@ -186,7 +282,6 @@ class SiliconFlowEmbeddings(Embeddings):
         return self._get_embedding(text)
 
     def _get_embedding(self, text: str) -> List[float]:
-        """调用SiliconFlow API获取文本向量"""
         payload = {
             "model": self.model,
             "input": text,
@@ -223,17 +318,14 @@ class StateKnowledgeBase:
         self.max_entries = params.get("max_state_entries", 500)
         self.persist_directory = params.get("state_persist_directory", "./state_vectorstore")
         self.verbose = verbose
-        
-        # 初始化嵌入模型和向量存储
         self.embed_model = SiliconFlowEmbeddings(token=self.embedding_token, verbose=verbose)
-        self.vectorstore = None  # 延迟初始化
+        self.vectorstore = None
         
         # 如果需要清空state知识库
         if params.get("clear_state_on_init", True):
             self.clear_state_vectorstore()
     
     def _initialize_vectorstore(self):
-        """初始化或加载已有的向量存储"""
         if self.vectorstore is not None:
             return
             
@@ -267,19 +359,9 @@ class StateKnowledgeBase:
         if self.verbose:
             print("Clearing state KB...")
         
-        # 关闭现有连接
-        if self.vectorstore is not None:
-            try:
-                if hasattr(self.vectorstore, '_client') and self.vectorstore._client:
-                    self.vectorstore._client.reset()
-                if hasattr(self.vectorstore, '_collection'):
-                    del self.vectorstore._collection
-                del self.vectorstore
-            except Exception as e:
-                if self.verbose:
-                    print(f"Error closing state vectorstore: {e}")
-            finally:
-                self.vectorstore = None
+        # 🚀 使用统一的连接管理
+        manage_vectorstore(self.vectorstore, close_connection=True, kb_name="State KB", verbose=self.verbose)
+        self.vectorstore = None
         
         import gc
         gc.collect()
@@ -300,7 +382,7 @@ class StateKnowledgeBase:
         except Exception as e:
             if self.verbose:
                 print(f"Failed to create state directory: {e}")
-    
+
     def add_page_state(self, page_title: str, action_list: List, selected_action_index: int, 
                       reasoning: str = "", timestamp: str = None):
         """
@@ -346,7 +428,6 @@ class StateKnowledgeBase:
                 else:
                     other_actions.append(action_info)
             
-            # 构建结构化的状态信息
             state_summary = {
                 "total_actions": len(action_list),
                 "click_actions_count": len(click_actions),
@@ -423,27 +504,19 @@ class StateKnowledgeBase:
                 print(f"Saved state: {page_title} ({state_summary['total_actions']} actions, {len(split_docs)} chunks)")
             
             # 清理旧记录
-            self._cleanup_old_records()
+            manage_vectorstore(self.vectorstore, self.max_entries, kb_name="State KB", verbose=self.verbose)
             
         except Exception as e:
             if self.verbose:
                 print(f"Failed to save page state: {e}")
     
     def _cleanup_old_records(self):
-        """清理过多的旧记录，保持知识库在合理大小"""
-        try:
-            if self.vectorstore and hasattr(self.vectorstore, '_collection'):
-                current_count = self.vectorstore._collection.count()
-                if current_count > self.max_entries:
-                    if self.verbose:
-                        print(f"Warning: State KB has {current_count} records (limit: {self.max_entries})")
-        except Exception as e:
-            if self.verbose:
-                print(f"Error checking state records: {e}")
-    
+        """使用统一的向量存储管理函数"""
+        return manage_vectorstore(self.vectorstore, self.max_entries, kb_name="State KB", verbose=self.verbose)
+
     def retrieve_similar_states(self, current_page_title: str, action_count: int, k: int = 3) -> str:
         """
-        检索相似的页面状态信息
+        根据页面标题和动作数量检索相似的页面状态信息
         """
         try:
             if self.vectorstore is None:
@@ -487,17 +560,13 @@ class ThinkingKnowledgeBase:
         self.max_entries = params.get("max_thinking_entries", 1000)  # 限制知识库大小
         self.persist_directory = params.get("thinking_persist_directory", "./thinking_vectorstore")
         self.verbose = verbose
-        
-        # 初始化嵌入模型和向量存储
         self.embed_model = SiliconFlowEmbeddings(token=self.embedding_token, verbose=verbose)
-        self.vectorstore = None  # 延迟初始化
+        self.vectorstore = None
         
-        # 如果需要清空thinking知识库
         if params.get("clear_thinking_on_init", True):
             self.clear_thinking_vectorstore()
         
     def _initialize_vectorstore(self):
-        """初始化或加载已有的向量存储"""
         if self.vectorstore is not None:
             return
             
@@ -530,26 +599,13 @@ class ThinkingKnowledgeBase:
             )
 
     def clear_thinking_vectorstore(self):
-        """
-        清空Thinking知识库 - 彻底删除所有相关文件
-        """
+        """清空Thinking知识库 - 彻底删除所有相关文件"""
         if self.verbose:
             print("Clearing thinking KB...")
         
-        # 1. 关闭现有的向量存储连接
-        if self.vectorstore is not None:
-            try:
-                # 尝试关闭Chroma连接
-                if hasattr(self.vectorstore, '_client') and self.vectorstore._client:
-                    self.vectorstore._client.reset()
-                if hasattr(self.vectorstore, '_collection'):
-                    del self.vectorstore._collection
-                del self.vectorstore
-            except Exception as e:
-                if self.verbose:
-                    print(f"Error closing thinking vectorstore: {e}")
-            finally:
-                self.vectorstore = None
+        # 🚀 使用统一的连接管理
+        manage_vectorstore(self.vectorstore, close_connection=True, kb_name="Thinking KB", verbose=self.verbose)
+        self.vectorstore = None
         
         # 2. 强制垃圾回收
         import gc
@@ -580,14 +636,12 @@ class ThinkingKnowledgeBase:
             return
             
         try:
-            # 延迟初始化向量存储
             if self.vectorstore is None:
                 self._initialize_vectorstore()
                 
             if timestamp is None:
                 timestamp = datetime.now().isoformat()
             
-            # 构造文档内容，包含上下文信息
             content = f"""
             时间: {timestamp}
             测试场景: {prompt[:200]}...
@@ -614,56 +668,44 @@ class ThinkingKnowledgeBase:
 
             self.vectorstore.add_documents(split_docs)
             
-            # 兼容旧版本的持久化方法
             try:
                 if hasattr(self.vectorstore, 'persist'):
                     self.vectorstore.persist()
             except Exception:
-                pass  # 新版本自动持久化，忽略错误
+                pass
             
             if self.verbose:
                 print(f"Saved thinking: {action_taken[:30]}... ({len(split_docs)} chunks)")
             
-            # 检查并清理旧记录以控制大小
-            self._cleanup_old_records()
+            self.cleanup_counter += 1
+            if self.cleanup_counter >= self.cleanup_interval:
+                manage_vectorstore(self.vectorstore, self.max_entries, kb_name="Thinking KB", verbose=self.verbose)
+                self.cleanup_counter = 0
             
         except Exception as e:
             if self.verbose:
                 print(f"Failed to save thinking: {e}")
     
     def _cleanup_old_records(self):
-        """清理过多的旧记录，保持知识库在合理大小"""
-        try:
-            if self.vectorstore and hasattr(self.vectorstore, '_collection'):
-                current_count = self.vectorstore._collection.count()
-                if current_count > self.max_entries:
-                    # 这里可以实现更复杂的清理策略，比如删除最旧的记录
-                    # 当前简单实现：当记录过多时给出警告
-                    if self.verbose:
-                        print(f"Warning: Thinking KB has {current_count} records (limit: {self.max_entries})")
-        except Exception as e:
-            if self.verbose:
-                print(f"Error checking thinking records: {e}")
-    
+        """使用统一的向量存储管理函数"""
+        return manage_vectorstore(self.vectorstore, self.max_entries, kb_name="Thinking KB", verbose=self.verbose)
+
     def retrieve_relevant_thinking(self, query: str, k: int = 3) -> str:
         """
         根据查询检索相关的thinking记录
         """
         try:
-            # 延迟初始化向量存储
             if self.vectorstore is None:
                 self._initialize_vectorstore()
                 
             if self.vectorstore is None or self.vectorstore._collection.count() == 0:
                 return ""
             
-            # 搜索相关文档
             results = self.vectorstore.similarity_search(query, k=k)
             
             if not results:
                 return ""
             
-            # 组织检索到的thinking记录
             relevant_thinking = []
             for doc in results:
                 relevant_thinking.append(doc.page_content)
@@ -681,10 +723,8 @@ class RetrieverInterface:
     def __init__(self, params, verbose=False):
         self.knowledge_path = params.get("knowledge_path", r"C:\Users\ASUS\Desktop\Reasoning+RAG Web Exploration\Make LLM a Testing Expert Bringing Human-like Interaction to.pdf")
         
-        # 固定的网页测试注意事项PDF文件路径 - 修复路径计算
-        # 获取当前脚本的目录，然后计算相对于项目根目录的路径
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.dirname(os.path.dirname(current_dir))  # 向上两级到项目根目录
+        project_root = os.path.dirname(os.path.dirname(current_dir))
         self.web_testing_pdf = os.path.join(project_root, "agent", "网页测试核心注意事项 (Core Considerations for Web Testing).pdf")
         
         self.chunk_size = params.get("chunk_size", 500)
@@ -693,46 +733,13 @@ class RetrieverInterface:
         self.collection_name = params.get("collection_name", "siliconflow_embed")
         self.top_k = params.get("top_k", 3)
         self.verbose = verbose
-        
-        # 设置持久化目录 - 用于RAG数据库存储
         self.persist_directory = params.get("rag_persist_directory", "./rag_vectorstore")
-        
-        # 加载文档和创建向量库的缓存
         self._vectorstore = None
 
     def _close_vectorstore_connections(self):
-        """
-        彻底关闭向量存储连接和释放资源
-        """
-        if self._vectorstore is not None:
-            try:
-                if self.verbose:
-                    print("Closing vectorstore connections...")
-                
-                # 关闭Chroma客户端连接
-                if hasattr(self._vectorstore, '_client') and self._vectorstore._client:
-                    try:
-                        self._vectorstore._client.reset()
-                    except Exception as e:
-                        if self.verbose:
-                            print(f"Failed to reset Chroma client: {e}")
-                
-                # 清理集合引用
-                if hasattr(self._vectorstore, '_collection'):
-                    try:
-                        del self._vectorstore._collection
-                    except Exception as e:
-                        if self.verbose:
-                            print(f"Failed to delete collection: {e}")
-                
-                # 删除向量存储对象
-                del self._vectorstore
-                
-            except Exception as e:
-                if self.verbose:
-                    print(f"Error closing vectorstore: {e}")
-            finally:
-                self._vectorstore = None
+        """使用统一的连接关闭方法"""
+        manage_vectorstore(self._vectorstore, close_connection=True, kb_name="RAG KB", verbose=self.verbose)
+        self._vectorstore = None
 
     def _force_close_sqlite_connections(self):
         """
@@ -840,14 +847,12 @@ class RetrieverInterface:
                 print(f"Failed to create persist directory: {e}")
 
     def _load_vectorstore(self):
-        """延迟加载向量存储，避免不必要的资源消耗"""
         if self._vectorstore is not None:
             return
 
         if self.verbose:
             print("Initializing RAG knowledge base...")
 
-        # 添加备用路径检查
         possible_paths = [
             self.web_testing_pdf,
             os.path.join(os.getcwd(), "..", "网页测试核心注意事项 (Core Considerations for Web Testing).pdf"),
@@ -867,14 +872,12 @@ class RetrieverInterface:
         try:
             all_docs = []
             
-            # 1. 加载原有的知识文件（如果存在）
             if self.knowledge_path and os.path.exists(self.knowledge_path):
                 if self.verbose:
                     print(f"Loading knowledge file: {os.path.basename(self.knowledge_path)}")
                 loader = PyPDFLoader(self.knowledge_path)
                 pages = loader.load_and_split()
                 
-                # 为文档添加来源标记
                 for page in pages:
                     page.metadata["source_file"] = "Knowledge Base"
                 
@@ -882,14 +885,12 @@ class RetrieverInterface:
                 if self.verbose:
                     print(f"Loaded {len(pages)} pages")
             
-            # 2. 加载固定的网页测试注意事项PDF
             if actual_pdf_path:
                 if self.verbose:
                     print("Loading web testing guidelines")
                 loader = PyPDFLoader(actual_pdf_path)
                 pages = loader.load_and_split()
                 
-                # 为文档添加来源标记
                 for page in pages:
                     page.metadata["source_file"] = "Web Testing Guidelines"
                 
@@ -903,7 +904,7 @@ class RetrieverInterface:
             if not all_docs:
                 if self.verbose:
                     print("Warning: No knowledge documents found")
-                # 创建空的向量存储
+
                 embed_model = SiliconFlowEmbeddings(token=self.embedding_token, verbose=self.verbose)
                 self._vectorstore = Chroma(
                     embedding_function=embed_model,
@@ -912,7 +913,6 @@ class RetrieverInterface:
                 )
                 return
             
-            # 4. 知识切片
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=self.chunk_size,
                 chunk_overlap=self.chunk_overlap,
@@ -921,7 +921,6 @@ class RetrieverInterface:
             if self.verbose:
                 print(f"Document splitting complete: {len(docs)} chunks")
             
-            # 5. 创建向量数据库（使用持久化存储）
             embed_model = SiliconFlowEmbeddings(token=self.embedding_token, verbose=self.verbose)
             self._vectorstore = Chroma.from_documents(
                 documents=docs, 
@@ -936,7 +935,7 @@ class RetrieverInterface:
         except Exception as e:
             if self.verbose:
                 print(f"Failed to load vectorstore: {e}")
-            # 创建空的向量存储以避免后续错误
+
             embed_model = SiliconFlowEmbeddings(token=self.embedding_token, verbose=self.verbose)
             self._vectorstore = Chroma(
                 embedding_function=embed_model,
@@ -946,7 +945,6 @@ class RetrieverInterface:
 
     def retrieve(self, prompt: str) -> str:
         try:
-            # 延迟初始化向量库
             if not self._vectorstore:
                 self._load_vectorstore()
             
@@ -955,7 +953,6 @@ class RetrieverInterface:
                     print("Vectorstore not initialized, cannot retrieve")
                 return prompt
                 
-            # 检索相关文档
             query = prompt
             result = self._vectorstore.similarity_search(query, k=self.top_k)
             
@@ -964,7 +961,6 @@ class RetrieverInterface:
                     print("No relevant knowledge retrieved")
                 return prompt
             
-            # 组合检索结果，按来源分组
             source_groups = {}
             for doc in result:
                 source = doc.metadata.get("source_file", "Unknown")
@@ -972,7 +968,6 @@ class RetrieverInterface:
                     source_groups[source] = []
                 source_groups[source].append(doc.page_content)
             
-            # 构建增强的提示
             knowledge_sections = []
             for source, contents in source_groups.items():
                 section = f"[{source}]:\n" + "\n".join(contents)
@@ -1006,24 +1001,34 @@ class RetrieverInterface:
 class rag_llm_agent(Agent):
     def __init__(self, params):
         self.params = params
-        self.verbose = params.get("verbose", False)  # 添加verbose控制参数
+        self.verbose = params.get("verbose", False)
         
-        # 初始化组件时传递verbose参数
         self.llm = LLMInterface(params, verbose=self.verbose)
         self.retriever = RetrieverInterface(params, verbose=self.verbose)
-        self.thinking_kb = ThinkingKnowledgeBase(params, verbose=self.verbose)  # thinking知识库
-        self.state_kb = StateKnowledgeBase(params, verbose=self.verbose)  # 新增状态知识库
+        self.thinking_kb = ThinkingKnowledgeBase(params, verbose=self.verbose)
+        self.state_kb = StateKnowledgeBase(params, verbose=self.verbose)
         self.app_name = params.get("app_name", "Web Testing")
         self.history = []
         self.max_history_length = params.get("max_history_length", 5)
 
-        # 检查是否需要在初始化时重置LLM会话
+        self.login_state = "none"  # none, detected, username_filled, password_filled, completed
+        self.login_credentials = {
+            "username": "Nefelibata-Zhu",
+            "password": "han19780518"
+        }
+        self.login_attempts = 0
+        self.max_login_attempts = 3
+
+        self.explored_pages = set()
+        self.executed_actions = {}
+        self.page_action_history = {}
+        self.bug_indicators = []
+
         if params.get("reset_llm_on_init", True):
             if self.verbose:
                 print("Resetting LLM session on init...")
             self.reset_llm_session()
 
-        # 检查是否需要在初始化时清空RAG数据库
         if params.get("clear_rag_on_init", True):
             if self.verbose:
                 print("Clearing RAG database on init...")
@@ -1032,10 +1037,119 @@ class rag_llm_agent(Agent):
         if self.verbose:
             print(f"RAG LLM Agent initialized for {self.app_name}")
             print(f"Session ID: {self.llm.session_id[:8]}")
+            print("🧠 纯LLM决策系统已启用")
+
+    def reset_login_state(self):
+        self.login_state = "none"
+        self.login_attempts = 0
+        if self.verbose:
+            print("登录状态已重置")
+
+    def set_login_credentials(self, username: str, password: str):
+        """
+        设置登录凭证
+        
+        Args:
+            username: 用户名或邮箱
+            password: 密码
+        """
+        self.login_credentials["username"] = username
+        self.login_credentials["password"] = password
+        if self.verbose:
+            print(f"🔐 登录凭证已更新 - 用户名: {username}")
+
+    def handle_smart_login(self, action_list, page_title: str = "") -> WebAction:
+        """
+        🔐 智能登录状态机 - 自动完成登录流程
+        """
+        if self.verbose:
+            print(f"🔐 智能登录处理 - 当前状态: {self.login_state}")
+
+        # 分析可用动作
+        username_actions = []
+        password_actions = []
+        login_button_actions = []
+        
+        for i, action in enumerate(action_list):
+            if isinstance(action, RandomInputAction):
+                field_text = action.text.lower()
+                if any(keyword in field_text for keyword in ["username", "email", "user"]):
+                    username_actions.append((i, action))
+                elif any(keyword in field_text for keyword in ["password", "pwd"]):
+                    password_actions.append((i, action))
+            elif isinstance(action, ClickAction):
+                click_text = action.text.lower()
+                if any(keyword in click_text for keyword in ["sign in", "login", "log in", "登录"]):
+                    login_button_actions.append((i, action))
+
+        # 状态机逻辑
+        if self.login_state == "none" or self.login_state == "detected":
+            # 第一步：填写用户名
+            if username_actions:
+                self.login_state = "username_filling"
+                action_index, selected_action = username_actions[0]
+                
+                if hasattr(selected_action, 'set_input_text'):
+                    selected_action.set_input_text(self.login_credentials["username"])
+                
+                action_description = f"🔐 自动填入用户名: {self.login_credentials['username']}"
+                self.history.append(action_description)
+                
+                if self.verbose:
+                    print(f"🔐 步骤1: 填入用户名 - Action [{action_index}]")
+                print(f"Action [{action_index}]: 🔐 AUTO LOGIN - Username input")
+                
+                self.login_state = "username_filled"
+                return selected_action
+
+        elif self.login_state == "username_filled":
+            # 第二步：填写密码
+            if password_actions:
+                self.login_state = "password_filling"
+                action_index, selected_action = password_actions[0]
+                
+                if hasattr(selected_action, 'set_input_text'):
+                    selected_action.set_input_text(self.login_credentials["password"])
+                
+                action_description = f"🔐 自动填入密码: {'*' * len(self.login_credentials['password'])}"
+                self.history.append(action_description)
+                
+                if self.verbose:
+                    print(f"🔐 步骤2: 填入密码 - Action [{action_index}]")
+                print(f"Action [{action_index}]: 🔐 AUTO LOGIN - Password input")
+                
+                self.login_state = "password_filled"
+                return selected_action
+
+        elif self.login_state == "password_filled":
+            # 第三步：点击登录按钮
+            if login_button_actions:
+                action_index, selected_action = login_button_actions[0]
+                
+                action_description = "🔐 自动点击登录按钮"
+                self.history.append(action_description)
+                
+                if self.verbose:
+                    print(f"🔐 步骤3: 点击登录按钮 - Action [{action_index}]")
+                print(f"Action [{action_index}]: 🔐 AUTO LOGIN - Click login button")
+                
+                self.login_state = "completed"
+                return selected_action
+
+        # 如果没有找到对应的动作，增加尝试次数
+        self.login_attempts += 1
+        if self.login_attempts >= self.max_login_attempts:
+            if self.verbose:
+                print(f"🔐 登录尝试失败 {self.max_login_attempts} 次，切换到普通模式")
+            self.login_state = "completed"  # 强制完成，使用普通逻辑
+            return None
+        
+        # 返回 None 表示继续尝试
+        return None
 
     def clear_rag_database(self):
         """
-        清空RAG数据库 - 提供给外部调用的便捷方法
+        清空三个RAG数据库
         """
         try:
             if self.verbose:
@@ -1147,7 +1261,50 @@ class rag_llm_agent(Agent):
         # 如果有2个或以上的登录相关字段，认为是登录页面
         return login_field_count >= 2
 
-    def generate_login_focused_prompt(self, action_list, page_context: str, history_str: str) -> str:
+    def get_action_signature(self, action) -> str:
+        """
+        生成动作的唯一签名，用于去重
+        """
+        if hasattr(action, 'text') and hasattr(action, 'location'):
+            return f"{type(action).__name__}_{action.text}_{action.location}"
+        elif hasattr(action, 'text'):
+            return f"{type(action).__name__}_{action.text}"
+        else:
+            return f"{type(action).__name__}_{str(action)}"
+
+    def update_exploration_history(self, current_url: str, selected_action, action_index: int):
+        """
+        更新探索历史记录
+        """
+        # 记录访问的页面
+        self.explored_pages.add(current_url)
+        
+        # 记录执行的动作
+        if current_url not in self.executed_actions:
+            self.executed_actions[current_url] = {}
+        
+        action_signature = self.get_action_signature(selected_action)
+        if action_signature not in self.executed_actions[current_url]:
+            self.executed_actions[current_url][action_signature] = 0
+        self.executed_actions[current_url][action_signature] += 1
+        
+        # 记录页面动作历史
+        if current_url not in self.page_action_history:
+            self.page_action_history[current_url] = []
+        
+        self.page_action_history[current_url].append({
+            "action_text": getattr(selected_action, 'text', 'Unknown'),
+            "action_type": type(selected_action).__name__,
+            "action_index": action_index,
+            "timestamp": datetime.now().isoformat(),
+            "execution_count": self.executed_actions[current_url][action_signature]
+        })
+        
+        # 保持历史记录在合理范围内
+        if len(self.page_action_history[current_url]) > 20:
+            self.page_action_history[current_url] = self.page_action_history[current_url][-20:]
+
+    def generate_login_focused_prompt(self, action_list, page_context: str, history_str: str, page_title: str = "") -> str:
         """
         生成专注于登录的提示词
         """
@@ -1180,7 +1337,7 @@ class rag_llm_agent(Agent):
             login_suggestions += f"\n登录按钮索引: {login_button_actions}"
         
         return f"""
-        检测到GitHub登录页面！请立即完成登录流程。
+检测到登录页面！请立即完成登录流程。
         
         {page_context}
         {history_str}
@@ -1188,14 +1345,14 @@ class rag_llm_agent(Agent):
         可以操作的界面元素有:
         {action_descriptions_str}
         
-        登录操作建议：{login_suggestions}
+登录操作建议：{login_suggestions}
         
-        登录步骤（请严格按顺序执行）：
+登录步骤（请严格按顺序执行）：
         1. 找到用户名/邮箱输入字段 → 输入"Nefelibata-Zhu"
         2. 找到密码输入字段 → 输入"han19780518"
         3. 点击"Sign in"登录按钮（避免注册按钮）
         
-        重要提醒：
+重要提醒：
         - 优先完成登录，不要进行其他操作
         - 确保使用正确的凭据格式
         - 避免点击注册相关按钮
@@ -1209,7 +1366,7 @@ class rag_llm_agent(Agent):
 
     def get_action(self, web_state: WebState, html: str) -> WebAction:
         """
-        🚀 增强版决策方法 - 利用多层RAG信息进行智能决策
+        🧠 纯LLM决策方法 - 完全依赖LLM智能推理
         """
         action_list = web_state.get_action_list()
         if self.verbose:
@@ -1219,17 +1376,20 @@ class rag_llm_agent(Agent):
                 print("Warning: No available actions")
             return None
 
-        descriptions = [f"{i}. " + self.format_action_info(a) for i, a in enumerate(action_list)]
-        action_descriptions_str = "\n".join(descriptions)
-
         # 获取页面上下文信息
         page_context = ""
         page_title = ""
+        current_url = ""
         if html:
             title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE)
             if title_match:
                 page_title = title_match.group(1)
                 page_context = f"当前页面标题: {page_title}\n"
+        
+        if hasattr(web_state, 'url'):
+            current_url = web_state.url
+        elif page_title:
+            current_url = page_title
 
         # 构建历史记录字符串
         history_str = ""
@@ -1238,68 +1398,43 @@ class rag_llm_agent(Agent):
 
         # 检测是否为登录页面
         is_login_page = self.detect_login_page(action_list, html, page_title)
-        if self.verbose and is_login_page:
-            print("Detected login page")
-
-        # 根据是否为登录页面生成不同的提示词
-        if is_login_page:
-            print("🔐 检测到登录页面，使用专用登录提示词")
-            base_prompt = self.generate_login_focused_prompt(action_list, page_context, history_str)
-        else:
-            # 构建增强的基础提示，包含页面状态分析
-            action_count = len(action_list)
-            click_count = sum(1 for a in action_list if isinstance(a, ClickAction))
-            input_count = sum(1 for a in action_list if isinstance(a, RandomInputAction))
-            select_count = sum(1 for a in action_list if isinstance(a, RandomSelectAction))
+        
+        # 🔐 智能登录处理 - 优先使用状态机
+        if is_login_page and self.login_state != "completed":
+            if self.login_state == "none":
+                self.login_state = "detected"
+                print("🔐 检测到登录页面，启动智能登录状态机")
             
-            page_analysis = f"""
-当前页面状态分析:
-- 总可用动作: {action_count} 个
-- 点击元素: {click_count} 个
-- 输入字段: {input_count} 个
-- 选择框: {select_count} 个
-"""
-            
-            base_prompt = f"""
-我们正在测试"{self.app_name}"应用。
+            smart_login_action = self.handle_smart_login(action_list, page_title)
+            if smart_login_action is not None:
+                return smart_login_action
+            elif self.login_state == "completed":
+                print("🔐 登录流程已完成，切换到普通测试模式")
+                self.reset_login_state()
+        
+        if not is_login_page and self.login_state != "none":
+            if self.verbose:
+                print("🔐 离开登录页面，重置登录状态")
+            self.reset_login_state()
 
-{page_context}
-{page_analysis}
-{history_str}
-
-可以操作的界面元素有:
-{action_descriptions_str}
-
-作为Web测试专家，请选择最合适的操作来继续探索和测试应用。考虑以下因素:
-1. 当前页面的特点和主要功能
-2. 探索新功能和页面路径
-3. 测试关键功能流程
-4. 发现潜在的bug和边界情况
-5. 利用历史测试经验指导决策
-
-请返回一个数字，对应上面列表中动作的索引。
-如果选择的动作需要文本输入，请返回索引后跟冒号和输入文本。
-例如：选择用户名输入框并输入账号，返回"2:Nefelibata-Zhu"
-
-只返回索引数字或"索引:文本"格式，不要返回任何其他解释。
-""".strip()
-
+        # 🧠 LLM完全决策
+        print("🧠 使用纯LLM推理进行决策")
+        
         try:
-            # 🔍 1. 使用传统RAG增强提示（静态知识）
+            # 生成基础prompt
+            if is_login_page:
+                base_prompt = self.generate_login_focused_prompt(action_list, page_context, history_str, page_title)
+            else:
+                base_prompt = self.generate_simple_exploration_prompt(action_list, page_context, history_str, current_url)
+
+            # 集成知识库上下文
             augmented_prompt = self.retriever.retrieve(base_prompt)
-
-            # 🧠 2. 从thinking知识库检索相关推理经验
             thinking_context = self.thinking_kb.retrieve_relevant_thinking(base_prompt, k=3)
-
-            # 📊 3. 从状态知识库检索相似页面状态（重要改进！）
             state_context = self.state_kb.retrieve_similar_states(page_title, len(action_list), k=2)
 
-            # 🚀 4. 组合所有上下文信息
             context_sections = [augmented_prompt]
-            
             if thinking_context:
                 context_sections.append(thinking_context)
-            
             if state_context:
                 context_sections.append(state_context)
             
@@ -1309,7 +1444,7 @@ class rag_llm_agent(Agent):
                 rag_enhanced = len(augmented_prompt) > len(base_prompt)
                 print(f"Enhancement - RAG: {'✓' if rag_enhanced else '✗'} | Thinking: {'✓' if thinking_context else '✗'} | State: {'✓' if state_context else '✗'}")
 
-            # 5. 调用LLM获取决策和thinking过程
+            # LLM推理决策
             llm_response = self.llm.chat_with_thinking(final_prompt)
             llm_output = llm_response["content"]
             reasoning = llm_response["reasoning"]
@@ -1317,24 +1452,27 @@ class rag_llm_agent(Agent):
             if self.verbose:
                 print(f"LLM output: {llm_output}")
 
-            # 6. 解析LLM输出
+            # 解析LLM输出
             action_index, input_text = self.parse_output(llm_output, len(action_list))
 
             if action_index is not None and 0 <= action_index < len(action_list):
+                # LLM选择有效
                 selected_action = action_list[action_index]
-
-                # 如果是输入类动作并且有输入文本
+                
                 if isinstance(selected_action, RandomInputAction) and input_text:
                     if hasattr(selected_action, 'set_input_text'):
                         selected_action.set_input_text(input_text)
 
-                # 记录操作到历史
+                # 更新探索历史记录
+                self.update_exploration_history(current_url, selected_action, action_index)
+                
                 action_description = self.format_action_info(selected_action)
                 if input_text:
                     action_description += f" with input: '{input_text}'"
+                
                 self.history.append(action_description)
 
-                # 📊 7. 保存完整的页面状态信息到状态知识库（关键改进！）
+                # 保存知识库信息
                 self.state_kb.add_page_state(
                     page_title=page_title or "Unknown Page",
                     action_list=action_list,
@@ -1342,37 +1480,39 @@ class rag_llm_agent(Agent):
                     reasoning=reasoning
                 )
 
-                # 🧠 8. 保存thinking过程到thinking知识库
                 self.thinking_kb.add_thinking(
                     prompt=base_prompt,
                     reasoning=reasoning,
                     action_taken=action_description
                 )
 
-                # 保持历史记录在限定长度内
                 if len(self.history) > self.max_history_length:
                     self.history = self.history[-self.max_history_length:]
 
                 if self.verbose:
-                    print(f"Selected action [{action_index}]: {action_description}")
+                    print(f"✅ LLM选择 [{action_index}]: {action_description}")
                 else:
-                    # 在非verbose模式下，只显示最基本的选择信息
                     print(f"Action [{action_index}]: {self.format_action_info(selected_action)}")
                 
                 return selected_action
             else:
+                # LLM选择无效，随机回退
                 if self.verbose:
-                    print(f"Invalid index {action_index}, using fallback strategy")
-                fallback_action = random.choice(action_list)
-
-                # 即使是回退策略，也保存状态和thinking信息
-                fallback_description = f"Fallback: {self.format_action_info(fallback_action)}"
+                    print(f"⚠️ LLM选择 {action_index} 无效，使用随机回退策略")
+                
+                import random
+                fallback_index = random.randint(0, len(action_list) - 1)
+                fallback_action = action_list[fallback_index]
+                
+                self.update_exploration_history(current_url, fallback_action, fallback_index)
+                
+                fallback_description = f"Random Fallback: {self.format_action_info(fallback_action)} 🎲"
                 
                 self.state_kb.add_page_state(
                     page_title=page_title or "Unknown Page",
                     action_list=action_list,
-                    selected_action_index=action_list.index(fallback_action),
-                    reasoning=f"解析失败，使用随机回退策略: {reasoning if reasoning else '无推理过程'}"
+                    selected_action_index=fallback_index,
+                    reasoning=f"LLM选择无效，随机回退: {reasoning if reasoning else 'Random selection'}"
                 )
 
                 if reasoning:
@@ -1382,33 +1522,85 @@ class rag_llm_agent(Agent):
                         action_taken=fallback_description
                     )
 
+                self.history.append(fallback_description)
+                if len(self.history) > self.max_history_length:
+                    self.history = self.history[-self.max_history_length:]
+                
                 return fallback_action
 
         except Exception as e:
             if self.verbose:
-                print(f"Error in decision making: {e}")
-            fallback_action = random.choice(action_list)
-            fallback_index = action_list.index(fallback_action)
-
-            # 记录错误情况
-            error_reasoning = f"执行过程中发生错误: {str(e)}，使用随机策略作为备选"
-            error_description = f"Error fallback: {self.format_action_info(fallback_action)}"
+                print(f"❌ LLM推理失败: {e}，使用随机回退")
             
-            # 即使出错也保存状态信息
+            # 随机回退
+            import random
+            fallback_index = random.randint(0, len(action_list) - 1)
+            fallback_action = action_list[fallback_index]
+            
+            self.update_exploration_history(current_url, fallback_action, fallback_index)
+            
+            error_description = f"Error Fallback: {self.format_action_info(fallback_action)} ❌"
+            
             self.state_kb.add_page_state(
                 page_title=page_title or "Unknown Page",
                 action_list=action_list,
                 selected_action_index=fallback_index,
-                reasoning=error_reasoning
+                reasoning=f"执行过程中发生错误: {str(e)}，随机选择动作"
             )
             
             self.thinking_kb.add_thinking(
-                prompt=base_prompt,
-                reasoning=error_reasoning,
+                prompt="Error occurred in LLM reasoning",
+                reasoning=f"Error: {str(e)}",
                 action_taken=error_description
             )
 
+            self.history.append(error_description)
+            if len(self.history) > self.max_history_length:
+                self.history = self.history[-self.max_history_length:]
+            
             return fallback_action
+
+    def generate_simple_exploration_prompt(self, action_list: list, page_context: str, history_str: str, current_url: str) -> str:
+        """
+        🧠 生成简洁的探索导向prompt，完全依赖LLM智能
+        """
+        # 构建动作列表
+        descriptions = [f"{i}. " + self.format_action_info(a) for i, a in enumerate(action_list)]
+        action_descriptions_str = "\n".join(descriptions)
+        
+        # 探索统计
+        pages_visited = len(self.explored_pages)
+        
+        return f"""
+作为专业的Web测试专家，你的任务是智能地探索网站功能并发现潜在问题。
+
+{page_context}
+{history_str}
+
+📊 探索状态:
+- 已访问页面: {pages_visited}
+
+可以操作的界面元素:
+{action_descriptions_str}
+
+🎯 **探索策略**:
+1. **功能发现**: 优先探索新的、未尝试的功能
+2. **Bug发现**: 尝试边界情况和异常输入
+3. **用户体验**: 模拟真实用户的使用习惯
+4. **测试覆盖**: 确保全面覆盖各种交互方式
+
+🔍 **重点关注**:
+- 表单验证和输入处理
+- 导航和页面跳转
+- 错误处理和异常情况
+- 功能完整性测试
+
+**📝 选择格式**:
+- 点击动作：直接返回索引数字，如 "5"
+- 输入动作：返回"索引:文本"格式，如 "3:test@example.com"
+
+请基于你的专业判断选择最合适的动作，只返回索引数字或"索引:文本"格式。
+""".strip()
 
     def parse_output(self, output: str, num_actions: int) -> tuple:
         """
@@ -1477,14 +1669,118 @@ class rag_llm_agent(Agent):
             print(f"Failed to parse output: {cleaned_output[:50]}...")
         return None, None
 
+    def get_exploration_stats(self) -> dict:
+        """
+        获取探索统计信息
+        """
+        total_pages = len(self.explored_pages)
+        total_unique_actions = sum(len(actions) for actions in self.executed_actions.values())
+        
+        # 计算重复动作统计
+        overused_count = 0
+        new_actions_available = 0
+        
+        for url, actions in self.executed_actions.items():
+            for action_sig, count in actions.items():
+                if count > 2:  # 固定阈值，之前的max_action_repeats默认值
+                    overused_count += 1
+        
+        # 计算最活跃的页面
+        most_active_page = ""
+        max_actions = 0
+        for url, actions in self.executed_actions.items():
+            if len(actions) > max_actions:
+                max_actions = len(actions)
+                most_active_page = url
+        
+        return {
+            "explored_pages": total_pages,
+            "unique_actions_executed": total_unique_actions,
+            "overused_actions": overused_count,
+            "most_active_page": most_active_page,
+            "max_actions_on_page": max_actions,
+            "explored_pages_list": list(self.explored_pages)
+        }
+
+    def print_exploration_summary(self):
+        """
+        打印探索摘要
+        """
+        stats = self.get_exploration_stats()
+        print("\n" + "="*50)
+        print("🎯 智能探索系统 - 统计摘要")
+        print("="*50)
+        print(f"📊 已探索页面数量: {stats['explored_pages']}")
+        print(f"🎮 执行的唯一动作: {stats['unique_actions_executed']}")
+        print(f"⚠️ 过度使用的动作: {stats['overused_actions']}")
+        print(f"🏆 最活跃页面: {stats['most_active_page'][:50]}...")
+        print(f"🔥 该页面动作数: {stats['max_actions_on_page']}")
+        
+        if self.bug_indicators:
+            print(f"🐛 潜在Bug指标: {len(self.bug_indicators)}")
+            for indicator in self.bug_indicators[-3:]:  # 显示最近3个
+                print(f"   - {indicator}")
+        
+        print("="*50)
+
+    def debug_show_final_prompt(self, final_prompt: str):
+        """
+        调试方法：显示最终发送给LLM的完整prompt结构
+        """
+        if not self.verbose:
+            return
+            
+        print("\n" + "🔍 DEBUG: 最终Prompt结构" + "="*30)
+        
+        # 尝试分析prompt的各个部分
+        sections = final_prompt.split("\n\n")
+        
+        for i, section in enumerate(sections[:10]):  # 只显示前10个部分避免过长
+            if len(section.strip()) > 0:
+                # 识别不同类型的内容
+                if "专业知识库" in section:
+                    print(f"\n📚 第{i+1}部分 - RAG知识增强:")
+                    print("─" * 40)
+                    print(section[:300] + "..." if len(section) > 300 else section)
+                    
+                elif "相关的历史推理经验" in section:
+                    print(f"\n🧠 第{i+1}部分 - Thinking知识库:")
+                    print("─" * 40)
+                    print(section[:300] + "..." if len(section) > 300 else section)
+                    
+                elif "相似页面状态参考" in section:
+                    print(f"\n📊 第{i+1}部分 - 状态知识库:")
+                    print("─" * 40)
+                    print(section[:300] + "..." if len(section) > 300 else section)
+                    
+                elif any(keyword in section for keyword in ["可操作的界面元素", "探索策略", "登录步骤"]):
+                    print(f"\n🎯 第{i+1}部分 - 基础Prompt:")
+                    print("─" * 40)
+                    print(section[:500] + "..." if len(section) > 500 else section)
+                    
+                else:
+                    print(f"\n📝 第{i+1}部分 - 其他内容:")
+                    print("─" * 40)
+                    print(section[:200] + "..." if len(section) > 200 else section)
+        
+        print(f"\n💾 完整Prompt总长度: {len(final_prompt)} 字符")
+        print("🔍 DEBUG: Prompt结构分析完成" + "="*25 + "\n")
+
+    def improve_action_selection_randomness(self, action_list, exploration_scores, current_url: str) -> str:
+        """
+        已废弃的方法 - 改为纯LLM决策后不再使用
+        """
+        # 此方法已被删除，改为纯LLM决策
+        return ""
+
 
 def main():
-    """简化的RAG LLM Agent测试"""
+    """🧠 纯LLM决策RAG Agent测试 - 完全依赖智能推理"""
     # 测试参数
     test_params = {
         "api_key": "sk-esaaumvchjupuotzcybqofgbiuqbfmhwpvfwiyefacxznnpz",
         "embedding_token": "sk-esaaumvchjupuotzcybqofgbiuqbfmhwpvfwiyefacxznnpz",
-        "app_name": "Test Application",
+        "app_name": "Demo Website Testing",
         "verbose": True,  # 测试时启用详细输出
         "max_tokens": 512,
         "temperature": 0.7,
@@ -1494,8 +1790,8 @@ def main():
         "reset_llm_on_init": True,
     }
 
-    print("RAG LLM Agent Test")
-    print("=" * 40)
+    print("🧠 纯LLM决策RAG Agent - 完全依赖智能推理")
+    print("=" * 50)
     
     try:
         # 测试Agent初始化
@@ -1509,10 +1805,27 @@ def main():
         
         print(f"✓ Reset test: {'Success' if original_session != new_session else 'Failed'}")
         
-        print("=" * 40)
-        print("Test completed successfully!")
-        print("\nTo disable verbose output, set params['verbose'] = False")
+        # 测试纯LLM系统
+        print("\n🧠 纯LLM决策架构测试:")
+        print("✓ 决策策略: 完全依赖LLM智能推理")
+        print("✓ 知识增强: RAG + Thinking + State知识库")
+        print("✓ 回退机制: 随机选择保障系统稳定性")
+        print("✓ 探索策略: LLM自主判断和学习")
         
+        # 测试探索统计
+        print("\n📊 初始探索统计:")
+        agent.print_exploration_summary()
+        
+        print("=" * 50)
+        print("✅ 纯LLM决策系统测试完成!")
+        print("\n🧠 架构特点:")
+        print("• 🎯 完全LLM决策: 无预设规则，完全智能推理")
+        print("• 📚 知识库增强: 多层次上下文信息集成")
+        print("• 🔄 学习能力: 通过历史经验不断改进")
+        print("• 🛡️ 简单回退: 随机策略保障稳定运行")
+        print("• 🎨 灵活适应: 适应各种页面和场景")
+        print("\n💡 现在运行 python main.py 体验纯LLM决策!")
+            
     except Exception as e:
         print(f"✗ Test failed: {e}")
 

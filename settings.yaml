@@ -1,4 +1,4 @@
-default_profile: github-llm-2h
+default_profile: test-llm-2h
 default_output_path: ./webtest_output/result
 default_model_path: ./webtest_model
 default_session: test_session
@@ -7,7 +7,7 @@ default_continuous_restart_threshold: 5
 default_enable_screen_shot: True
 
 profiles:
-  github-llm-2h:
+  test-llm-2h:
     agent_num: 1
     record_interval: 180   # 记录output_data里每个json文件的时间间隔
     alive_time: 7200
@@ -16,10 +16,10 @@ profiles:
     browser_data_path: D:\projects\webtest-python\chrome_data
     driver_path: D:\projects\webtest-python\driver\chrome-win\chromedriver.exe
     resources_path: ./resources
-    entry_url: https://github.com
+    entry_url: https://bilibili.com
     domains:
-      - www.github.com
-      - github.com
+      - www.bilibili.com
+      - bilibili.com
     browser_arguments:
 #      - --window-size=1280,1000
           - --headless
@@ -45,6 +45,136 @@ profiles:
         gamma: 0.5
         epsilon: 0.5
         initial_q_value: 10.0
+
+  test-rl-2h-q:
+    agent_num: 1
+    record_interval: 180
+    alive_time: 7200
+    page_load_timeout: 30
+    browser_path: D:\projects\webtest-python\driver\chrome-win\chrome.exe
+    browser_data_path: D:\projects\webtest-python\chrome_data
+    driver_path: D:\projects\webtest-python\driver\chrome-win\chromedriver.exe
+    resources_path: ./resources
+    entry_url: https://bilibili.com
+    domains:
+      - www.bilibili.com
+      - bilibili.com
+    browser_arguments:
+      #      - --window-size=1280,1000
+      - --headless
+    action_detector:
+      module: action.detector.combination_detector
+      class: CombinationDetector
+      detectors:
+        - module: action.detector.click_action_detector
+          class: ClickActionDetector
+        - module: action.detector.random_input_action_detector
+          class: RandomInputActionDetector
+        - module: action.detector.random_select_action_detector
+          class: RandomSelectActionDetector
+    state:
+      module: state.impl.action_set_with_execution_times_state
+      class: ActionSetWithExecutionTimesState
+    agent:
+      module: agent.impl.q_learning_agent
+      class: QLearningAgent
+      params:
+        agent_type: Q
+        alpha: 1
+        gamma: 0.5
+        epsilon: 0.5
+        initial_q_value: 10.0
+        r_reward: 10.0
+        r_penalty: -9999.0
+        max_sim_line: 0.8
+
+  test-random-2h:
+    agent_num: 1
+    record_interval: 180   # 记录output_data里每个json文件的时间间隔
+    alive_time: 7200
+    page_load_timeout: 30   # 超时重启的时间间隔
+    browser_path: D:\projects\webtest-python\driver\chrome-win\chrome.exe
+    browser_data_path: D:\projects\webtest-python\chrome_data
+    driver_path: D:\projects\webtest-python\driver\chrome-win\chromedriver.exe
+    resources_path: ./resources
+    entry_url: https://bilibili.com
+    domains:
+      - www.bilibili.com
+      - bilibili.com
+    browser_arguments:
+      #      - --window-size=1280,1000
+      - --headless
+    action_detector: # 可执行动作的种类，例如点击事件、输入事件、选择事件
+      module: action.detector.combination_detector
+      class: CombinationDetector
+      detectors:
+        - module: action.detector.click_action_detector
+          class: ClickActionDetector
+        - module: action.detector.random_input_action_detector
+          class: RandomInputActionDetector
+        - module: action.detector.random_select_action_detector
+          class: RandomSelectActionDetector
+    state: # 定义状态的种类，例如url+可执行动作的集合
+      module: state.impl.action_set_with_execution_times_state
+      class: ActionSetWithExecutionTimesState
+    agent:
+      module: agent.impl.random_agent
+      class: RandomAgent
+      params:
+        agent_type: Random
+        alpha: 1
+        gamma: 0.5
+        epsilon: 0.5
+        initial_q_value: 10.0
+
+  test-drl-2h-dqn:
+    agent_num: 1
+    record_interval: 180
+    alive_time: 7200
+    page_load_timeout: 30
+    browser_path: D:\projects\webtest-python\driver\chrome-win\chrome.exe
+    browser_data_path: D:\projects\webtest-python\chrome_data
+    driver_path: D:\projects\webtest-python\driver\chrome-win\chromedriver.exe
+    resources_path: ./resources
+    entry_url: https://www.bilibili.com/
+    domains:
+      - www.github.com
+      - github.com
+    browser_arguments:
+      #      - --window-size=1280,1000
+      - --headless
+    action_detector:
+      module: action.detector.combination_detector
+      class: CombinationDetector
+      detectors:
+        - module: action.detector.click_action_detector
+          class: ClickActionDetector
+        - module: action.detector.random_input_action_detector
+          class: RandomInputActionDetector
+        - module: action.detector.random_select_action_detector
+          class: RandomSelectActionDetector
+    state:
+      module: state.impl.action_set_with_execution_times_state
+      class: ActionSetWithExecutionTimesState
+    agent:
+      module: agent.impl.drl_agent
+      class: DRLagent
+      params:
+        model_module: model.dense_net
+        model_class: DenseNet
+        algo_type: DQN
+        model_load_type: new
+        stop_update: False
+        transformer_module: transformer.impl.tag_transformer
+        transformer_class: TagTransformer
+        reward_function: A
+        batch_size: 32
+        learning_rate: 0.001
+        max_random: 0.9
+        min_random: 0.3
+        update_target_interval: 16
+        update_network_interval: 4
+        gamma: 0.5
 
   github-marl-2h-marg-dql-5agent:
     agent_num: 5
