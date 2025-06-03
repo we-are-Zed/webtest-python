@@ -563,6 +563,10 @@ class ThinkingKnowledgeBase:
         self.embed_model = SiliconFlowEmbeddings(token=self.embedding_token, verbose=verbose)
         self.vectorstore = None
         
+        # 清理计数器和间隔
+        self.cleanup_counter = 0
+        self.cleanup_interval = params.get("thinking_cleanup_interval", 20)  # 每20次添加后清理一次
+        
         if params.get("clear_thinking_on_init", True):
             self.clear_thinking_vectorstore()
         
@@ -998,15 +1002,640 @@ class RetrieverInterface:
             return prompt
 
 
+class DualModelSystem:
+    """
+    🚀 双模型协作系统 - R1探索 + QwQ决策
+    
+    工作流程：
+    1. 检测是否到达新状态
+    2. 如果是新状态，使用R1进行深度探索分析
+    3. 将R1的探索结果存储到专用知识库
+    4. 使用QwQ基于探索结果快速做决策
+    """
+    
+    def __init__(self, params, knowledge_bases=None, verbose=False):
+        self.verbose = verbose
+        
+        # 🚀 RAG知识库系统 - 接收外部传递的知识库实例
+        if knowledge_bases:
+            self.retriever = knowledge_bases.get('retriever')
+            self.state_kb = knowledge_bases.get('state_kb')
+            self.thinking_kb = knowledge_bases.get('thinking_kb')
+            self.exploration_kb = knowledge_bases.get('exploration_kb')
+        else:
+            # 如果没有传递知识库，则设为None
+            self.retriever = None
+            self.state_kb = None
+            self.thinking_kb = None
+            self.exploration_kb = None
+            if verbose:
+                print("⚠️ 警告: 未传递知识库实例，RAG增强功能将被禁用")
+        
+        # R1探索模型配置
+        r1_params = params.copy()
+        r1_params.update({
+            "model": "deepseek-ai/DeepSeek-R1",
+            "max_tokens": 2048,  # R1需要更多token用于深度分析
+            "temperature": 0.8,  # 稍高温度鼓励探索
+            "enable_thinking": True
+        })
+        
+        # QwQ决策模型配置  
+        qwq_params = params.copy()
+        qwq_params.update({
+            "model": "Qwen/QwQ-32B-Preview", 
+            "max_tokens": 512,   # QwQ只需少量token做决策
+            "temperature": 0.3,  # 低温度确保决策稳定
+            "enable_thinking": True
+        })
+        
+        self.r1_explorer = LLMInterface(r1_params, verbose)
+        self.qwq_decider = LLMInterface(qwq_params, verbose)
+        
+        # 状态跟踪
+        self.explored_states = set()  # 已探索的状态签名
+        self.state_exploration_cache = {}  # 状态探索结果缓存
+        self.exploration_count = 0
+        
+        if verbose:
+            print(f"🚀 双模型系统初始化:")
+            print(f"   📡 R1探索模型: {r1_params['model']}")
+            print(f"   ⚡ QwQ决策模型: {qwq_params['model']}")
+            print(f"   🧠 RAG增强: {'启用' if knowledge_bases else '禁用'}")
+    
+    def reset_for_new_test(self):
+        """重置双模型系统状态"""
+        self.r1_explorer.reset_session()
+        self.qwq_decider.reset_session()
+        self.explored_states.clear()
+        self.state_exploration_cache.clear()
+        self.exploration_count = 0
+        
+        if self.verbose:
+            print("🔄 双模型系统已重置")
+    
+    def generate_state_signature(self, page_title: str, action_list: list, html_snippet: str = "") -> str:
+        """
+        生成页面状态的唯一签名
+        """
+        # 基于页面标题、动作数量和类型生成签名
+        action_types = [type(action).__name__ for action in action_list]
+        action_signature = "_".join(sorted(set(action_types)))
+        
+        # 简化HTML特征(避免过于详细)
+        html_features = ""
+        if html_snippet:
+            # 提取关键HTML标签
+            import re
+            form_count = len(re.findall(r'<form', html_snippet, re.IGNORECASE))
+            input_count = len(re.findall(r'<input', html_snippet, re.IGNORECASE))
+            button_count = len(re.findall(r'<button', html_snippet, re.IGNORECASE))
+            html_features = f"form{form_count}_input{input_count}_btn{button_count}"
+        
+        signature = f"{page_title}_{len(action_list)}_{action_signature}_{html_features}"
+        return signature[:200]  # 限制长度
+    
+    def is_new_state(self, state_signature: str) -> bool:
+        """检查是否为新状态"""
+        return state_signature not in self.explored_states
+    
+    def r1_explore_state(self, page_title: str, action_list: list, page_context: str, 
+                        history_str: str, html: str = "") -> Dict[str, Any]:
+        """
+        🔍 R1模型深度探索新状态 - 增强版：结合RAG知识进行全面分析
+        
+        返回探索结果字典，包含：
+        - analysis: 页面分析
+        - strategy: 测试策略
+        - recommendations: 推荐动作
+        - risk_areas: 风险区域
+        """
+        self.exploration_count += 1
+        
+        # 🚀 R1探索的RAG增强 - 面向页面分析的知识检索
+        if self.verbose:
+            print(f"🔍 开始为R1探索收集RAG知识...")
+        
+        # 1. 检索专业web测试知识 - 帮助R1理解测试最佳实践
+        professional_knowledge = ""
+        if self.retriever:
+            try:
+                knowledge_query = f"页面测试分析 {page_title} 功能测试 风险识别"
+                professional_knowledge = self.retriever.retrieve(knowledge_query)
+                if self.verbose and professional_knowledge:
+                    print(f"   📚 获取专业知识: {len(professional_knowledge)} 字符")
+            except Exception as e:
+                if self.verbose:
+                    print(f"   ⚠️ 专业知识检索失败: {e}")
+        
+        # 2. 检索相似页面状态分析经验 - 帮助R1借鉴类似页面的分析
+        similar_states_context = ""
+        if self.state_kb:
+            try:
+                similar_states_context = self.state_kb.retrieve_similar_states(
+                    page_title, len(action_list), k=2
+                )
+                if self.verbose and similar_states_context:
+                    print(f"   📊 获取相似状态: {len(similar_states_context)} 字符")
+            except Exception as e:
+                if self.verbose:
+                    print(f"   ⚠️ 相似状态检索失败: {e}")
+        
+        # 3. 检索历史页面分析推理经验 - 帮助R1学习分析思路
+        analysis_experience = ""
+        if self.thinking_kb:
+            try:
+                thinking_query = f"页面功能分析 {page_title} 测试策略 风险评估"
+                analysis_experience = self.thinking_kb.retrieve_relevant_thinking(thinking_query, k=2)
+                if self.verbose and analysis_experience:
+                    print(f"   🧠 获取分析经验: {len(analysis_experience)} 字符")
+            except Exception as e:
+                if self.verbose:
+                    print(f"   ⚠️ 分析经验检索失败: {e}")
+        
+        # 🔍 RAG增强状态报告
+        if self.verbose:
+            rag_sources = []
+            if professional_knowledge: rag_sources.append("专业知识✓")
+            if similar_states_context: rag_sources.append("相似状态✓")
+            if analysis_experience: rag_sources.append("分析经验✓")
+            
+            if rag_sources:
+                print(f"   🚀 RAG增强来源: {' '.join(rag_sources)}")
+            else:
+                print(f"   ⚠️ 未获取到RAG增强数据，使用基础探索模式")
+        
+        # 构建详细的动作列表
+        action_details = []
+        for i, action in enumerate(action_list):
+            if isinstance(action, ClickAction):
+                details = f"{i}. [点击] {getattr(action, 'text', 'Unknown')} (类型: {getattr(action, 'action_type', 'unknown')})"
+            elif isinstance(action, RandomInputAction):
+                details = f"{i}. [输入] {getattr(action, 'text', 'Unknown')} (字段类型: {getattr(action, 'action_type', 'input')})"
+            elif isinstance(action, RandomSelectAction):
+                details = f"{i}. [选择] {getattr(action, 'text', 'Unknown')} (选项: {getattr(action, 'options', 'N/A')})"
+            else:
+                details = f"{i}. [其他] {getattr(action, 'text', 'Unknown')}"
+            action_details.append(details)
+        
+        # 🎯 构建RAG增强的R1探索prompt
+        exploration_prompt = f"""
+{professional_knowledge}
+
+{similar_states_context}
+
+{analysis_experience}
+
+🔍 **R1深度探索任务** - 探索编号 #{self.exploration_count}
+
+你是一位资深的Web测试专家，需要对当前页面进行深度分析和测试策略制定。
+请充分利用上述专业知识、相似页面经验和历史分析经验来指导你的分析。
+
+## 页面信息
+{page_context}
+{history_str}
+
+## 可用交互元素 ({len(action_list)}个)
+{chr(10).join(action_details)}
+
+## 📋 深度探索任务
+请基于专业知识和历史经验，进行全面的页面分析：
+
+### 1. **页面功能深度分析**
+- 基于专业知识，分析页面的主要功能和技术特点
+- 结合相似页面经验，识别页面在用户流程中的作用
+- 评估页面的复杂度和测试优先级
+
+### 2. **智能测试策略制定**  
+- 基于web测试最佳实践，制定针对性测试策略
+- 参考历史分析经验，确定关键验证点
+- 设计多层次的测试路径（正常流程、边界情况、异常场景）
+
+### 3. **专业风险识别**
+- 利用专业知识识别潜在的技术风险点
+- 基于相似页面经验预测可能的问题区域
+- 评估业务逻辑和用户体验风险
+
+### 4. **动作优先级智能建议**
+请从现有的{len(action_list)}个动作中，基于专业分析确定优先级：
+- **高价值动作** (索引和专业理由)
+- **风险探测动作** (索引和风险分析)
+- **完整性验证动作** (索引和验证目标)
+
+### 5. **测试数据专业建议**
+基于web测试经验，为输入字段建议：
+- **功能验证数据** (正常业务场景)
+- **边界值测试数据** (长度、格式、特殊字符)
+- **安全性测试数据** (注入、XSS等安全风险)
+
+### 6. **探索策略总结**
+基于当前分析，总结：
+- 本页面的测试重点和难点
+- 与相似页面的差异和特殊注意事项
+- 后续探索的方向建议
+
+请提供结构化且专业的分析结果，这将指导后续的精确测试执行。
+"""
+        
+        if self.verbose:
+            print(f"🔍 R1开始深度探索状态 #{self.exploration_count}: {page_title[:30]}...")
+        
+        try:
+            exploration_result = self.r1_explorer.chat_with_thinking(exploration_prompt)
+            
+            # 解析探索结果
+            analysis_content = exploration_result["content"]
+            reasoning_process = exploration_result["reasoning"]
+            
+            exploration_data = {
+                "exploration_id": self.exploration_count,
+                "page_title": page_title,
+                "timestamp": datetime.now().isoformat(),
+                "analysis": analysis_content,
+                "reasoning": reasoning_process,
+                "action_count": len(action_list),
+                "exploration_prompt": exploration_prompt[:800] + "...",  # 保存部分prompt用于调试
+                "model": "DeepSeek-R1",
+                "rag_enhanced": True,  # 标记使用了RAG增强
+                "knowledge_sources": {
+                    "professional_knowledge": len(professional_knowledge) > 0,
+                    "similar_states": len(similar_states_context) > 0,
+                    "analysis_experience": len(analysis_experience) > 0
+                }
+            }
+            
+            if self.verbose:
+                print(f"✅ R1探索完成 #{self.exploration_count} (RAG增强)")
+                print(f"   📝 分析长度: {len(analysis_content)} 字符")
+                print(f"   🧠 推理长度: {len(reasoning_process)} 字符")
+                print(f"   🚀 RAG来源: 专业知识✓ 相似状态✓ 分析经验✓")
+            
+            return exploration_data
+            
+        except Exception as e:
+            if self.verbose:
+                print(f"❌ R1探索失败 #{self.exploration_count}: {e}")
+            
+            # 返回基础探索结果
+            return {
+                "exploration_id": self.exploration_count,
+                "page_title": page_title,
+                "timestamp": datetime.now().isoformat(),
+                "analysis": f"RAG增强探索过程中出现错误: {str(e)}",
+                "reasoning": "",
+                "action_count": len(action_list),
+                "model": "DeepSeek-R1",
+                "rag_enhanced": False,
+                "error": str(e)
+            }
+    
+    def qwq_decide_action(self, action_list: list, exploration_data: Dict[str, Any], 
+                         page_context: str, history_str: str) -> tuple:
+        """
+        ⚡ QwQ模型基于R1探索结果快速决策 - 增强版：结合RAG经验进行精准决策
+        
+        返回: (action_output, reasoning)
+        """
+        # 提取R1的关键建议
+        r1_analysis = exploration_data.get("analysis", "")
+        r1_reasoning = exploration_data.get("reasoning", "")
+        
+        # 🚀 QwQ决策的RAG增强 - 面向执行决策的知识检索
+        if self.verbose:
+            print(f"⚡ 开始为QwQ决策收集RAG知识...")
+        
+        # 1. 检索R1历史探索洞察 - 帮助QwQ理解类似探索的决策模式
+        exploration_insights = ""
+        if self.exploration_kb:
+            try:
+                insights_query = f"页面决策 {exploration_data.get('page_title', '')} 动作选择 测试执行"
+                exploration_insights = self.exploration_kb.retrieve_exploration_insights(insights_query, k=2)
+                if self.verbose and exploration_insights:
+                    print(f"   🔍 获取探索洞察: {len(exploration_insights)} 字符")
+            except Exception as e:
+                if self.verbose:
+                    print(f"   ⚠️ 探索洞察检索失败: {e}")
+        
+        # 2. 检索相似页面的决策经验 - 帮助QwQ借鉴成功的决策案例
+        similar_decisions = ""
+        if self.state_kb:
+            try:
+                similar_decisions = self.state_kb.retrieve_similar_states(
+                    exploration_data.get('page_title', ''), len(action_list), k=2
+                )
+                if self.verbose and similar_decisions:
+                    print(f"   📊 获取决策经验: {len(similar_decisions)} 字符")
+            except Exception as e:
+                if self.verbose:
+                    print(f"   ⚠️ 决策经验检索失败: {e}")
+        
+        # 3. 检索历史执行决策推理 - 帮助QwQ学习决策思路
+        decision_experience = ""
+        if self.thinking_kb:
+            try:
+                decision_query = f"动作选择 {exploration_data.get('page_title', '')} 执行决策 测试策略"
+                decision_experience = self.thinking_kb.retrieve_relevant_thinking(decision_query, k=2)
+                if self.verbose and decision_experience:
+                    print(f"   🧠 获取决策推理: {len(decision_experience)} 字符")
+            except Exception as e:
+                if self.verbose:
+                    print(f"   ⚠️ 决策推理检索失败: {e}")
+        
+        # 🔍 RAG增强状态报告
+        if self.verbose:
+            rag_sources = []
+            if exploration_insights: rag_sources.append("探索洞察✓")
+            if similar_decisions: rag_sources.append("决策经验✓")
+            if decision_experience: rag_sources.append("推理经验✓")
+            
+            if rag_sources:
+                print(f"   🚀 RAG增强来源: {' '.join(rag_sources)}")
+            else:
+                print(f"   ⚠️ 未获取到RAG增强数据，使用基础决策模式")
+        
+        # 构建动作列表
+        action_list_str = "\n".join([
+            f"{i}. {self.format_action_simple(action)}" 
+            for i, action in enumerate(action_list)
+        ])
+        
+        # 🎯 构建RAG增强的QwQ决策prompt
+        decision_prompt = f"""
+{exploration_insights}
+
+{similar_decisions}
+
+{decision_experience}
+
+⚡ **QwQ智能决策任务**
+
+基于R1模型的深度探索分析和历史决策经验，请做出最优的动作选择。
+请充分利用上述探索洞察、相似决策经验和历史推理来指导你的决策。
+
+## 当前状态
+{page_context}
+{history_str}
+
+## R1深度探索分析
+{r1_analysis[:1000]}...
+
+## 可选动作 ({len(action_list)}个)
+{action_list_str}
+
+## 🎯 智能决策要求
+基于R1的专业分析和历史经验，选择当前最合适的动作：
+
+### 决策优先级
+1. **R1高价值推荐** - 优先考虑R1明确推荐的高价值动作
+2. **历史成功经验** - 参考相似场景下的成功决策模式
+3. **风险规避策略** - 避免历史上证明有风险的动作类型
+4. **测试完整性** - 确保测试覆盖的全面性和系统性
+
+### 决策考虑因素
+- **功能验证**: 当前动作是否能有效验证核心功能
+- **探索价值**: 动作是否能带来新的有价值信息
+- **执行风险**: 基于历史经验评估动作的风险程度
+- **测试进度**: 考虑当前测试的整体进度和覆盖情况
+
+### 输出要求
+**严格按照以下格式输出**：
+- 点击动作：直接返回数字，如 "3"
+- 输入动作：返回"数字:文本"，如 "5:test@example.com"
+
+**决策原则**：
+- 基于R1的专业分析和历史经验
+- 选择测试价值最高、风险最可控的动作
+- 确保决策的准确性和执行的有效性
+
+请基于上述全面分析快速做出精准决策，只返回动作索引或"索引:文本"格式。
+"""
+        
+        if self.verbose:
+            print(f"⚡ QwQ开始智能决策...")
+        
+        try:
+            decision_result = self.qwq_decider.chat_with_thinking(decision_prompt)
+            qwq_output = decision_result["content"]
+            qwq_reasoning = decision_result["reasoning"]
+            
+            if self.verbose:
+                print(f"⚡ QwQ决策输出: {qwq_output}")
+                print(f"🧠 QwQ推理: {qwq_reasoning[:100]}...")
+                print(f"🚀 RAG来源: 探索洞察✓ 决策经验✓ 推理经验✓")
+            
+            return qwq_output, qwq_reasoning
+            
+        except Exception as e:
+            if self.verbose:
+                print(f"❌ QwQ决策失败: {e}")
+            return None, f"RAG增强决策错误: {str(e)}"
+    
+    def format_action_simple(self, action) -> str:
+        """简化的动作格式化"""
+        if isinstance(action, ClickAction):
+            return f"点击 '{getattr(action, 'text', 'Unknown')}'"
+        elif isinstance(action, RandomInputAction):
+            return f"输入 '{getattr(action, 'text', 'Unknown')}'"
+        elif isinstance(action, RandomSelectAction):
+            return f"选择 '{getattr(action, 'text', 'Unknown')}'"
+        else:
+            return f"操作 '{getattr(action, 'text', 'Unknown')}'"
+    
+    def get_dual_model_stats(self) -> dict:
+        """获取双模型系统统计"""
+        return {
+            "total_explorations": self.exploration_count,
+            "cached_states": len(self.explored_states),
+            "cache_size": len(self.state_exploration_cache),
+            "r1_session_id": self.r1_explorer.session_id[:8],
+            "qwq_session_id": self.qwq_decider.session_id[:8]
+        }
+
+
+class ExplorationKnowledgeBase:
+    """
+    🔍 专门存储R1探索结果的知识库
+    """
+    
+    def __init__(self, params, verbose=False):
+        self.embedding_token = params.get("embedding_token", "sk-esaaumvchjupuotzcybqofgbiuqbfmhwpvfwiyefacxznnpz")
+        self.collection_name = params.get("exploration_collection_name", "exploration_knowledge")
+        self.chunk_size = params.get("exploration_chunk_size", 1000)  # 探索结果较大
+        self.chunk_overlap = params.get("exploration_chunk_overlap", 150)
+        self.max_entries = params.get("max_exploration_entries", 200)
+        self.persist_directory = params.get("exploration_persist_directory", "./exploration_vectorstore")
+        self.verbose = verbose
+        self.embed_model = SiliconFlowEmbeddings(token=self.embedding_token, verbose=verbose)
+        self.vectorstore = None
+        
+        if params.get("clear_exploration_on_init", True):
+            self.clear_exploration_vectorstore()
+    
+    def _initialize_vectorstore(self):
+        if self.vectorstore is not None:
+            return
+            
+        try:
+            if os.path.exists(self.persist_directory):
+                self.vectorstore = Chroma(
+                    persist_directory=self.persist_directory,
+                    embedding_function=self.embed_model,
+                    collection_name=self.collection_name
+                )
+                if self.verbose:
+                    print(f"Loaded exploration KB with {self.vectorstore._collection.count()} documents")
+            else:
+                self.vectorstore = Chroma(
+                    persist_directory=self.persist_directory,
+                    embedding_function=self.embed_model,
+                    collection_name=self.collection_name
+                )
+                if self.verbose:
+                    print("Created new exploration KB")
+        except Exception as e:
+            if self.verbose:
+                print(f"Failed to initialize exploration KB: {e}")
+            self.vectorstore = Chroma(
+                embedding_function=self.embed_model,
+                collection_name=self.collection_name
+            )
+    
+    def clear_exploration_vectorstore(self):
+        """清空探索知识库"""
+        if self.verbose:
+            print("Clearing exploration KB...")
+        
+        manage_vectorstore(self.vectorstore, close_connection=True, kb_name="Exploration KB", verbose=self.verbose)
+        self.vectorstore = None
+        
+        import gc
+        gc.collect()
+        
+        if os.path.exists(self.persist_directory):
+            try:
+                shutil.rmtree(self.persist_directory)
+                if self.verbose:
+                    print("Exploration KB cleared")
+            except Exception as e:
+                if self.verbose:
+                    print(f"Failed to clear exploration KB: {e}")
+        
+        try:
+            os.makedirs(self.persist_directory, exist_ok=True)
+        except Exception as e:
+            if self.verbose:
+                print(f"Failed to create exploration directory: {e}")
+    
+    def add_exploration_result(self, exploration_data: Dict[str, Any]):
+        """添加R1探索结果到知识库"""
+        try:
+            if self.vectorstore is None:
+                self._initialize_vectorstore()
+            
+            # 构建探索文档内容
+            content = f"""
+探索ID: {exploration_data.get('exploration_id', 'Unknown')}
+时间: {exploration_data.get('timestamp', 'Unknown')}
+页面: {exploration_data.get('page_title', 'Unknown')}
+动作数量: {exploration_data.get('action_count', 0)}
+使用模型: {exploration_data.get('model', 'Unknown')}
+
+=== R1深度分析 ===
+{exploration_data.get('analysis', '')}
+
+=== R1推理过程 ===
+{exploration_data.get('reasoning', '')}
+
+=== 探索摘要 ===
+这是一次针对"{exploration_data.get('page_title', 'Unknown')}"页面的深度探索，
+发现了{exploration_data.get('action_count', 0)}个可交互元素，
+由DeepSeek-R1模型进行专业分析和测试策略制定。
+"""
+            
+            doc = Document(
+                page_content=content,
+                metadata={
+                    "exploration_id": exploration_data.get('exploration_id'),
+                    "timestamp": exploration_data.get('timestamp'),
+                    "page_title": exploration_data.get('page_title', '')[:100],
+                    "action_count": exploration_data.get('action_count', 0),
+                    "model": exploration_data.get('model', ''),
+                    "type": "r1_exploration_result"
+                }
+            )
+            
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=self.chunk_size,
+                chunk_overlap=self.chunk_overlap
+            )
+            split_docs = text_splitter.split_documents([doc])
+            self.vectorstore.add_documents(split_docs)
+            
+            try:
+                if hasattr(self.vectorstore, 'persist'):
+                    self.vectorstore.persist()
+            except Exception:
+                pass
+            
+            if self.verbose:
+                print(f"💾 保存R1探索结果 #{exploration_data.get('exploration_id')} ({len(split_docs)} chunks)")
+            
+            # 清理旧记录
+            manage_vectorstore(self.vectorstore, self.max_entries, kb_name="Exploration KB", verbose=self.verbose)
+            
+        except Exception as e:
+            if self.verbose:
+                print(f"Failed to save exploration result: {e}")
+    
+    def retrieve_exploration_insights(self, query: str, k: int = 2) -> str:
+        """检索R1探索洞察"""
+        try:
+            if self.vectorstore is None:
+                self._initialize_vectorstore()
+                
+            if self.vectorstore is None or self.vectorstore._collection.count() == 0:
+                return ""
+            
+            results = self.vectorstore.similarity_search(query, k=k)
+            
+            if not results:
+                return ""
+            
+            insights = []
+            for doc in results:
+                insights.append(doc.page_content)
+            
+            exploration_context = "\n--- R1探索洞察 ---\n" + "\n\n".join(insights)
+            return exploration_context
+            
+        except Exception as e:
+            if self.verbose:
+                print(f"Failed to retrieve exploration insights: {e}")
+            return ""
+
+
 class rag_llm_agent(Agent):
     def __init__(self, params):
         self.params = params
         self.verbose = params.get("verbose", False)
         
-        self.llm = LLMInterface(params, verbose=self.verbose)
+        # 🚀 先初始化所有知识库系统
         self.retriever = RetrieverInterface(params, verbose=self.verbose)
         self.thinking_kb = ThinkingKnowledgeBase(params, verbose=self.verbose)
         self.state_kb = StateKnowledgeBase(params, verbose=self.verbose)
+        self.exploration_kb = ExplorationKnowledgeBase(params, verbose=self.verbose)
+        
+        # 🧠 将所有知识库打包传递给双模型系统
+        knowledge_bases = {
+            'retriever': self.retriever,
+            'state_kb': self.state_kb,
+            'thinking_kb': self.thinking_kb,
+            'exploration_kb': self.exploration_kb
+        }
+        
+        # 🚀 初始化双模型协作系统 - 传递知识库实例
+        self.dual_model_system = DualModelSystem(params, knowledge_bases=knowledge_bases, verbose=self.verbose)
+        
         self.app_name = params.get("app_name", "Web Testing")
         self.history = []
         self.max_history_length = params.get("max_history_length", 5)
@@ -1024,20 +1653,27 @@ class rag_llm_agent(Agent):
         self.page_action_history = {}
         self.bug_indicators = []
 
-        if params.get("reset_llm_on_init", True):
+        if params.get("reset_dual_model_on_init", True):
             if self.verbose:
-                print("Resetting LLM session on init...")
-            self.reset_llm_session()
+                print("Resetting dual model system on init...")
+            self.reset_dual_model_session()
 
         if params.get("clear_rag_on_init", True):
             if self.verbose:
-                print("Clearing RAG database on init...")
-            self.clear_rag_database()
+                print("Clearing all RAG databases on init...")
+            self.clear_all_rag_databases()
 
         if self.verbose:
-            print(f"RAG LLM Agent initialized for {self.app_name}")
-            print(f"Session ID: {self.llm.session_id[:8]}")
-            print("🧠 纯LLM决策系统已启用")
+            print(f"🚀 双模型RAG Agent initialized for {self.app_name}")
+            stats = self.dual_model_system.get_dual_model_stats()
+            print(f"   📡 R1会话: {stats['r1_session_id']}")
+            print(f"   ⚡ QwQ会话: {stats['qwq_session_id']}")
+            print("🧠 R1探索 + QwQ决策 协作系统已启用")
+            print("🚀 四层RAG知识库系统已启用:")
+            print("   📖 RetrieverKB: 专业测试知识文档")
+            print("   🧠 ThinkingKB: 模型推理过程记录")
+            print("   📊 StateKB: 页面状态和交互历史")
+            print("   🔍 ExplorationKB: R1探索结果专用存储")
 
     def reset_login_state(self):
         self.login_state = "none"
@@ -1169,7 +1805,8 @@ class rag_llm_agent(Agent):
         重置LLM会话状态 - 确保测试独立性
         """
         try:
-            self.llm.reset_session()
+            self.dual_model_system.r1_explorer.reset_session()
+            self.dual_model_system.qwq_decider.reset_session()
             if self.verbose:
                 print("LLM session reset successfully")
         except Exception as e:
@@ -1186,14 +1823,14 @@ class rag_llm_agent(Agent):
         # 1. 清空历史记录
         self.history = []
         
-        # 2. 重置LLM会话状态
-        self.reset_llm_session()
+        # 2. 重置双模型系统状态
+        self.reset_dual_model_session()
         
         # 3. 清空所有RAG数据库（包括状态知识库）
         self.clear_rag_database()
         
         if self.verbose:
-            print(f"Agent reset complete - New session: {self.llm.session_id[:8]}")
+            print(f"Agent reset complete - New session: {self.dual_model_system.r1_explorer.session_id[:8]}")
 
     def format_action_info(self, action):
         """格式化动作信息"""
@@ -1366,7 +2003,7 @@ class rag_llm_agent(Agent):
 
     def get_action(self, web_state: WebState, html: str) -> WebAction:
         """
-        🧠 纯LLM决策方法 - 完全依赖LLM智能推理
+        🚀 双模型协作决策方法 - R1探索 + QwQ决策
         """
         action_list = web_state.get_action_list()
         if self.verbose:
@@ -1409,7 +2046,7 @@ class rag_llm_agent(Agent):
             if smart_login_action is not None:
                 return smart_login_action
             elif self.login_state == "completed":
-                print("🔐 登录流程已完成，切换到普通测试模式")
+                print("🔐 登录流程已完成，切换到双模型测试模式")
                 self.reset_login_state()
         
         if not is_login_page and self.login_state != "none":
@@ -1417,46 +2054,82 @@ class rag_llm_agent(Agent):
                 print("🔐 离开登录页面，重置登录状态")
             self.reset_login_state()
 
-        # 🧠 LLM完全决策
-        print("🧠 使用纯LLM推理进行决策")
+        # 🚀 双模型协作决策
+        print("🚀 使用双模型协作系统进行决策")
         
         try:
-            # 生成基础prompt
-            if is_login_page:
-                base_prompt = self.generate_login_focused_prompt(action_list, page_context, history_str, page_title)
-            else:
-                base_prompt = self.generate_simple_exploration_prompt(action_list, page_context, history_str, current_url)
-
-            # 集成知识库上下文
-            augmented_prompt = self.retriever.retrieve(base_prompt)
-            thinking_context = self.thinking_kb.retrieve_relevant_thinking(base_prompt, k=3)
-            state_context = self.state_kb.retrieve_similar_states(page_title, len(action_list), k=2)
-
-            context_sections = [augmented_prompt]
-            if thinking_context:
-                context_sections.append(thinking_context)
-            if state_context:
-                context_sections.append(state_context)
+            # 1. 生成状态签名
+            state_signature = self.dual_model_system.generate_state_signature(
+                page_title, action_list, html[:500]  # 只使用前500字符避免过长
+            )
             
-            final_prompt = "\n\n".join(context_sections)
+            # 2. 检查是否为新状态
+            is_new_state = self.dual_model_system.is_new_state(state_signature)
+            
+            if is_new_state:
+                # 3a. 新状态：使用R1进行深度探索
+                print(f"🔍 检测到新状态，启动R1深度探索")
+                
+                exploration_data = self.dual_model_system.r1_explore_state(
+                    page_title=page_title or "Unknown Page",
+                    action_list=action_list,
+                    page_context=page_context,
+                    history_str=history_str,
+                    html=html
+                )
+                
+                # 保存探索结果到专用知识库
+                self.exploration_kb.add_exploration_result(exploration_data)
+                
+                # 标记状态为已探索
+                self.dual_model_system.explored_states.add(state_signature)
+                self.dual_model_system.state_exploration_cache[state_signature] = exploration_data
+                
+                # 3b. 基于R1探索结果，使用QwQ快速决策
+                qwq_output, qwq_reasoning = self.dual_model_system.qwq_decide_action(
+                    action_list=action_list,
+                    exploration_data=exploration_data,
+                    page_context=page_context,
+                    history_str=history_str
+                )
+                
+                combined_reasoning = f"R1探索: {exploration_data.get('reasoning', '')[:200]}... | QwQ决策: {qwq_reasoning[:200]}..."
+                
+            else:
+                # 4. 已知状态：直接使用QwQ基于缓存的探索结果决策
+                print(f"⚡ 已知状态，使用QwQ快速决策")
+                
+                cached_exploration = self.dual_model_system.state_exploration_cache.get(state_signature)
+                if cached_exploration:
+                    qwq_output, qwq_reasoning = self.dual_model_system.qwq_decide_action(
+                        action_list=action_list,
+                        exploration_data=cached_exploration,
+                        page_context=page_context,
+                        history_str=history_str
+                    )
+                else:
+                    # 缓存丢失，快速生成基础探索信息
+                    basic_exploration = {
+                        "analysis": f"基础状态分析：页面有{len(action_list)}个可交互元素",
+                        "reasoning": "使用基础探索信息进行快速决策"
+                    }
+                    qwq_output, qwq_reasoning = self.dual_model_system.qwq_decide_action(
+                        action_list=action_list,
+                        exploration_data=basic_exploration,
+                        page_context=page_context,
+                        history_str=history_str
+                    )
+                
+                combined_reasoning = f"缓存决策: {qwq_reasoning[:300]}..."
 
             if self.verbose:
-                rag_enhanced = len(augmented_prompt) > len(base_prompt)
-                print(f"Enhancement - RAG: {'✓' if rag_enhanced else '✗'} | Thinking: {'✓' if thinking_context else '✗'} | State: {'✓' if state_context else '✗'}")
+                print(f"双模型输出: {qwq_output}")
 
-            # LLM推理决策
-            llm_response = self.llm.chat_with_thinking(final_prompt)
-            llm_output = llm_response["content"]
-            reasoning = llm_response["reasoning"]
-
-            if self.verbose:
-                print(f"LLM output: {llm_output}")
-
-            # 解析LLM输出
-            action_index, input_text = self.parse_output(llm_output, len(action_list))
+            # 5. 解析QwQ输出
+            action_index, input_text = self.parse_output(qwq_output, len(action_list))
 
             if action_index is not None and 0 <= action_index < len(action_list):
-                # LLM选择有效
+                # 决策有效
                 selected_action = action_list[action_index]
                 
                 if isinstance(selected_action, RandomInputAction) and input_text:
@@ -1477,28 +2150,30 @@ class rag_llm_agent(Agent):
                     page_title=page_title or "Unknown Page",
                     action_list=action_list,
                     selected_action_index=action_index,
-                    reasoning=reasoning
+                    reasoning=combined_reasoning
                 )
 
                 self.thinking_kb.add_thinking(
-                    prompt=base_prompt,
-                    reasoning=reasoning,
+                    prompt=f"双模型协作: 新状态={is_new_state}",
+                    reasoning=combined_reasoning,
                     action_taken=action_description
                 )
 
                 if len(self.history) > self.max_history_length:
                     self.history = self.history[-self.max_history_length:]
 
+                # 显示决策结果
+                model_info = "🔍R1+⚡QwQ" if is_new_state else "⚡QwQ"
                 if self.verbose:
-                    print(f"✅ LLM选择 [{action_index}]: {action_description}")
+                    print(f"✅ {model_info}选择 [{action_index}]: {action_description}")
                 else:
-                    print(f"Action [{action_index}]: {self.format_action_info(selected_action)}")
+                    print(f"Action [{action_index}]: {self.format_action_info(selected_action)} ({model_info})")
                 
                 return selected_action
             else:
-                # LLM选择无效，随机回退
+                # 决策无效，随机回退
                 if self.verbose:
-                    print(f"⚠️ LLM选择 {action_index} 无效，使用随机回退策略")
+                    print(f"⚠️ 双模型选择 {action_index} 无效，使用随机回退策略")
                 
                 import random
                 fallback_index = random.randint(0, len(action_list) - 1)
@@ -1512,13 +2187,13 @@ class rag_llm_agent(Agent):
                     page_title=page_title or "Unknown Page",
                     action_list=action_list,
                     selected_action_index=fallback_index,
-                    reasoning=f"LLM选择无效，随机回退: {reasoning if reasoning else 'Random selection'}"
+                    reasoning=f"双模型选择无效，随机回退: {combined_reasoning if 'combined_reasoning' in locals() else 'Random selection'}"
                 )
 
-                if reasoning:
+                if 'combined_reasoning' in locals():
                     self.thinking_kb.add_thinking(
-                        prompt=base_prompt,
-                        reasoning=reasoning,
+                        prompt="双模型决策失败",
+                        reasoning=combined_reasoning,
                         action_taken=fallback_description
                     )
 
@@ -1530,7 +2205,7 @@ class rag_llm_agent(Agent):
 
         except Exception as e:
             if self.verbose:
-                print(f"❌ LLM推理失败: {e}，使用随机回退")
+                print(f"❌ 双模型协作失败: {e}，使用随机回退")
             
             # 随机回退
             import random
@@ -1545,11 +2220,11 @@ class rag_llm_agent(Agent):
                 page_title=page_title or "Unknown Page",
                 action_list=action_list,
                 selected_action_index=fallback_index,
-                reasoning=f"执行过程中发生错误: {str(e)}，随机选择动作"
+                reasoning=f"双模型系统错误: {str(e)}，随机选择动作"
             )
             
             self.thinking_kb.add_thinking(
-                prompt="Error occurred in LLM reasoning",
+                prompt="双模型系统错误",
                 reasoning=f"Error: {str(e)}",
                 action_taken=error_description
             )
@@ -1559,48 +2234,6 @@ class rag_llm_agent(Agent):
                 self.history = self.history[-self.max_history_length:]
             
             return fallback_action
-
-    def generate_simple_exploration_prompt(self, action_list: list, page_context: str, history_str: str, current_url: str) -> str:
-        """
-        🧠 生成简洁的探索导向prompt，完全依赖LLM智能
-        """
-        # 构建动作列表
-        descriptions = [f"{i}. " + self.format_action_info(a) for i, a in enumerate(action_list)]
-        action_descriptions_str = "\n".join(descriptions)
-        
-        # 探索统计
-        pages_visited = len(self.explored_pages)
-        
-        return f"""
-作为专业的Web测试专家，你的任务是智能地探索网站功能并发现潜在问题。
-
-{page_context}
-{history_str}
-
-📊 探索状态:
-- 已访问页面: {pages_visited}
-
-可以操作的界面元素:
-{action_descriptions_str}
-
-🎯 **探索策略**:
-1. **功能发现**: 优先探索新的、未尝试的功能
-2. **Bug发现**: 尝试边界情况和异常输入
-3. **用户体验**: 模拟真实用户的使用习惯
-4. **测试覆盖**: 确保全面覆盖各种交互方式
-
-🔍 **重点关注**:
-- 表单验证和输入处理
-- 导航和页面跳转
-- 错误处理和异常情况
-- 功能完整性测试
-
-**📝 选择格式**:
-- 点击动作：直接返回索引数字，如 "5"
-- 输入动作：返回"索引:文本"格式，如 "3:test@example.com"
-
-请基于你的专业判断选择最合适的动作，只返回索引数字或"索引:文本"格式。
-""".strip()
 
     def parse_output(self, output: str, num_actions: int) -> tuple:
         """
@@ -1773,58 +2406,145 @@ class rag_llm_agent(Agent):
         # 此方法已被删除，改为纯LLM决策
         return ""
 
+    def reset_dual_model_session(self):
+        """
+        重置双模型会话状态 - 确保测试独立性
+        """
+        try:
+            self.dual_model_system.reset_for_new_test()
+            if self.verbose:
+                print("Dual model system reset successfully")
+        except Exception as e:
+            if self.verbose:
+                print(f"Failed to reset dual model system: {e}")
+
+    def clear_all_rag_databases(self):
+        """
+        清空所有RAG数据库（包括新的探索知识库）
+        """
+        try:
+            if self.verbose:
+                print("Clearing all RAG databases...")
+            self.retriever.clear_vectorstore()
+            self.thinking_kb.clear_thinking_vectorstore()
+            self.state_kb.clear_state_vectorstore()
+            self.exploration_kb.clear_exploration_vectorstore()
+            
+            if self.verbose:
+                print("All RAG databases cleared successfully")
+        except Exception as e:
+            if self.verbose:
+                print(f"Failed to clear RAG databases: {e}")
+
+    def reset_for_new_test(self):
+        """
+        为新测试重置Agent状态 - 双模型版本
+        """
+        if self.verbose:
+            print("Resetting dual-model agent for new test...")
+        
+        # 1. 清空历史记录
+        self.history = []
+        
+        # 2. 重置双模型系统状态
+        self.reset_dual_model_session()
+        
+        # 3. 清空所有RAG数据库
+        self.clear_all_rag_databases()
+        
+        if self.verbose:
+            stats = self.dual_model_system.get_dual_model_stats()
+            print(f"Agent reset complete - R1: {stats['r1_session_id']}, QwQ: {stats['qwq_session_id']}")
+
 
 def main():
-    """🧠 纯LLM决策RAG Agent测试 - 完全依赖智能推理"""
+    """🚀 双模型协作RAG Agent测试 - R1探索 + QwQ决策"""
     # 测试参数
     test_params = {
         "api_key": "sk-esaaumvchjupuotzcybqofgbiuqbfmhwpvfwiyefacxznnpz",
         "embedding_token": "sk-esaaumvchjupuotzcybqofgbiuqbfmhwpvfwiyefacxznnpz",
-        "app_name": "Demo Website Testing",
+        "app_name": "Dual Model Web Testing",
         "verbose": True,  # 测试时启用详细输出
-        "max_tokens": 512,
+        "max_tokens": 1024,  # 基础配置，会被各模型覆盖
         "temperature": 0.7,
         "clear_rag_on_init": True,
         "clear_thinking_on_init": True,
         "clear_state_on_init": True,
-        "reset_llm_on_init": True,
+        "clear_exploration_on_init": True,  # 新增：清理探索知识库
+        "reset_dual_model_on_init": True,  # 新增：重置双模型系统
     }
 
-    print("🧠 纯LLM决策RAG Agent - 完全依赖智能推理")
-    print("=" * 50)
+    print("🚀 双模型协作RAG Agent - R1探索 + QwQ决策")
+    print("=" * 60)
     
     try:
         # 测试Agent初始化
         agent = rag_llm_agent(test_params)
-        print("✓ Agent initialized successfully")
+        print("✓ 双模型Agent初始化成功")
+        
+        # 测试双模型系统统计
+        stats = agent.dual_model_system.get_dual_model_stats()
+        print(f"✓ 双模型系统状态:")
+        print(f"  📡 R1会话ID: {stats['r1_session_id']}")
+        print(f"  ⚡ QwQ会话ID: {stats['qwq_session_id']}")
+        print(f"  📊 探索次数: {stats['total_explorations']}")
+        print(f"  💾 缓存状态: {stats['cached_states']}")
         
         # 测试重置功能
-        original_session = agent.llm.session_id
+        original_r1_session = stats['r1_session_id']
+        original_qwq_session = stats['qwq_session_id']
+        
         agent.reset_for_new_test()
-        new_session = agent.llm.session_id
+        new_stats = agent.dual_model_system.get_dual_model_stats()
         
-        print(f"✓ Reset test: {'Success' if original_session != new_session else 'Failed'}")
+        reset_success = (
+            original_r1_session != new_stats['r1_session_id'] and
+            original_qwq_session != new_stats['qwq_session_id']
+        )
+        print(f"✓ 重置测试: {'Success' if reset_success else 'Failed'}")
         
-        # 测试纯LLM系统
-        print("\n🧠 纯LLM决策架构测试:")
-        print("✓ 决策策略: 完全依赖LLM智能推理")
-        print("✓ 知识增强: RAG + Thinking + State知识库")
-        print("✓ 回退机制: 随机选择保障系统稳定性")
-        print("✓ 探索策略: LLM自主判断和学习")
+        # 测试双模型架构特性
+        print("\n🚀 双模型协作架构特性:")
+        print("┌─────────────────────────────────────────────────┐")
+        print("│  🔍 R1模型 (DeepSeek-R1)                       │")
+        print("│  ├─ 职责: 新状态深度探索分析                   │")
+        print("│  ├─ 特点: 2048 tokens, 高温度(0.8)            │")
+        print("│  └─ 输出: 页面分析、测试策略、风险识别         │")
+        print("│                                                 │")
+        print("│  ⚡ QwQ模型 (Qwen/QwQ-32B-Preview)              │")
+        print("│  ├─ 职责: 基于R1分析快速决策                   │")
+        print("│  ├─ 特点: 512 tokens, 低温度(0.3)             │")
+        print("│  └─ 输出: 具体动作选择                         │")
+        print("└─────────────────────────────────────────────────┘")
         
-        # 测试探索统计
-        print("\n📊 初始探索统计:")
-        agent.print_exploration_summary()
+        print("\n🔄 工作流程:")
+        print("1. 🔍 状态检测 → 生成页面状态签名")
+        print("2. 🆕 新状态? → R1深度探索 → 存储到探索知识库")
+        print("3. ⚡ QwQ决策 → 基于R1分析快速选择动作")
+        print("4. 🔄 已知状态 → 直接QwQ决策(利用缓存)")
         
-        print("=" * 50)
-        print("✅ 纯LLM决策系统测试完成!")
-        print("\n🧠 架构特点:")
-        print("• 🎯 完全LLM决策: 无预设规则，完全智能推理")
-        print("• 📚 知识库增强: 多层次上下文信息集成")
-        print("• 🔄 学习能力: 通过历史经验不断改进")
-        print("• 🛡️ 简单回退: 随机策略保障稳定运行")
-        print("• 🎨 灵活适应: 适应各种页面和场景")
-        print("\n💡 现在运行 python main.py 体验纯LLM决策!")
+        print("\n📚 四层知识库系统:")
+        print("• 🔍 ExplorationKB: R1探索结果专用存储")
+        print("• 📊 StateKB: 页面状态和交互历史")
+        print("• 🧠 ThinkingKB: 模型推理过程记录")
+        print("• 📖 RetrieverKB: 专业测试知识文档")
+        
+        print("\n💡 系统优势:")
+        print("🎯 精准探索: R1模型专注深度分析新状态")
+        print("⚡ 快速决策: QwQ模型基于分析结果高效执行")
+        print("💰 成本优化: 避免重复探索，大幅降低token消耗")
+        print("🔄 智能缓存: 已知状态复用探索结果")
+        print("🛡️ 容错机制: 多层回退保障系统稳定")
+        
+        print("\n" + "=" * 60)
+        print("✅ 双模型协作系统测试完成!")
+        print("\n🚀 核心创新:")
+        print("• 🔍 R1专注探索: 只在新状态时激活，深度分析")
+        print("• ⚡ QwQ专注决策: 快速响应，降低延迟")
+        print("• 💾 智能缓存: 避免重复探索，显著节省成本")
+        print("• 📚 知识增强: 四层RAG系统提供全面上下文")
+        print("• 🎨 自适应: 根据状态新旧程度动态选择策略")
+        print("\n💡 现在运行 python main.py 体验双模型协作!")
             
     except Exception as e:
         print(f"✗ Test failed: {e}")
