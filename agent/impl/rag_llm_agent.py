@@ -5,6 +5,7 @@ import json
 import shutil
 from datetime import datetime
 from typing import List, Dict, Any
+import math
 
 from action.impl.click_action import ClickAction
 from action.impl.random_input_action import RandomInputAction
@@ -1002,6 +1003,250 @@ class RetrieverInterface:
             return prompt
 
 
+class DiversityTracker:
+    """
+    🎲 多样性跟踪器 - 监控和增强测试的多样性
+    """
+    
+    def __init__(self, verbose=False):
+        self.verbose = verbose
+        self.action_diversity_score = 0.0
+        self.path_diversity_score = 0.0
+        self.exploration_history = []
+        self.decision_modes_used = {}  # 跟踪使用的决策模式
+        self.exploration_strategies_used = {}  # 跟踪使用的探索策略
+        
+        # 探索策略权重（动态调整）
+        self.exploration_strategy_weights = {
+            'conservative': 0.25,    # 保守策略：基于成功经验
+            'innovative': 0.35,     # 创新策略：探索新路径
+            'balanced': 0.25,       # 平衡策略：综合考虑
+            'risk_focused': 0.15    # 风险导向：专注边界测试
+        }
+        
+        # 决策模式权重（动态调整）
+        self.decision_mode_weights = {
+            'conservative': 0.3,    # 保守决策：基于历史成功
+            'exploratory': 0.4,     # 探索决策：尝试新路径
+            'balanced': 0.3         # 平衡决策：综合考虑
+        }
+    
+    def select_exploration_strategy(self) -> str:
+        """
+        🎯 智能选择探索策略，平衡各种策略的使用
+        """
+        # 计算各策略的使用频率
+        total_used = sum(self.exploration_strategies_used.values()) or 1
+        strategy_usage = {
+            strategy: self.exploration_strategies_used.get(strategy, 0) / total_used
+            for strategy in self.exploration_strategy_weights.keys()
+        }
+        
+        # 计算调整后的权重（降低过度使用策略的权重）
+        adjusted_weights = {}
+        for strategy, base_weight in self.exploration_strategy_weights.items():
+            usage_penalty = strategy_usage[strategy] * 0.5  # 使用频率惩罚
+            adjusted_weights[strategy] = max(0.1, base_weight - usage_penalty)
+        
+        # 加权随机选择
+        strategies = list(adjusted_weights.keys())
+        weights = list(adjusted_weights.values())
+        selected_strategy = random.choices(strategies, weights=weights)[0]
+        
+        # 更新使用计数
+        self.exploration_strategies_used[selected_strategy] = self.exploration_strategies_used.get(selected_strategy, 0) + 1
+        
+        if self.verbose:
+            print(f"🎯 选择探索策略: {selected_strategy} (权重: {adjusted_weights[selected_strategy]:.2f})")
+        
+        return selected_strategy
+    
+    def select_decision_mode(self) -> str:
+        """
+        ⚡ 智能选择决策模式，确保决策多样性
+        """
+        # 计算各模式的使用频率
+        total_used = sum(self.decision_modes_used.values()) or 1
+        mode_usage = {
+            mode: self.decision_modes_used.get(mode, 0) / total_used
+            for mode in self.decision_mode_weights.keys()
+        }
+        
+        # 计算调整后的权重
+        adjusted_weights = {}
+        for mode, base_weight in self.decision_mode_weights.items():
+            usage_penalty = mode_usage[mode] * 0.4  # 使用频率惩罚
+            adjusted_weights[mode] = max(0.1, base_weight - usage_penalty)
+        
+        # 加权随机选择
+        modes = list(adjusted_weights.keys())
+        weights = list(adjusted_weights.values())
+        selected_mode = random.choices(modes, weights=weights)[0]
+        
+        # 更新使用计数
+        self.decision_modes_used[selected_mode] = self.decision_modes_used.get(selected_mode, 0) + 1
+        
+        if self.verbose:
+            print(f"⚡ 选择决策模式: {selected_mode} (权重: {adjusted_weights[selected_mode]:.2f})")
+        
+        return selected_mode
+    
+    def calculate_action_diversity(self, action_history: List[str]) -> float:
+        """
+        📊 计算动作多样性分数
+        """
+        if len(action_history) < 2:
+            return 1.0
+        
+        # 分析最近的动作类型分布
+        recent_actions = action_history[-10:]  # 分析最近10个动作
+        action_types = {}
+        for action in recent_actions:
+            action_type = action.split()[0] if action else "Unknown"
+            action_types[action_type] = action_types.get(action_type, 0) + 1
+        
+        # 计算熵作为多样性指标
+        total = len(recent_actions)
+        entropy = 0
+        for count in action_types.values():
+            p = count / total
+            if p > 0:
+                entropy -= p * math.log2(p)
+        
+        # 归一化到0-1范围
+        max_entropy = math.log2(len(action_types)) if action_types else 1
+        diversity_score = entropy / max_entropy if max_entropy > 0 else 0
+        
+        self.action_diversity_score = diversity_score
+        return diversity_score
+    
+    def get_diversity_feedback(self, action_history: List[str]) -> str:
+        """
+        🎨 获取多样性反馈建议
+        """
+        diversity_score = self.calculate_action_diversity(action_history)
+        
+        if diversity_score < 0.3:
+            return """
+🎲 **多样性增强建议**：
+- 当前测试模式较为单一，建议尝试不同类型的交互
+- 考虑探索输入字段、选择框、链接等多种元素
+- 尝试不同的测试数据和操作序列
+"""
+        elif diversity_score < 0.6:
+            return """
+⚖️ **平衡性建议**：
+- 测试多样性适中，可以在当前基础上适度扩展
+- 注意平衡探索新功能和验证已知功能
+- 适当增加边界条件和异常场景测试
+"""
+        else:
+            return """
+🌟 **多样性良好**：
+- 当前测试展现了良好的多样性
+- 继续保持多元化的测试策略
+- 可以深入探索发现的有趣功能点
+"""
+    
+    def get_exploration_enhancement_queries(self, page_title: str, exploration_strategy: str) -> List[str]:
+        """
+        🔍 根据选择的探索策略生成增强查询
+        """
+        base_queries = {
+            'conservative': [
+                f"页面测试分析 {page_title} 功能测试 风险识别",
+                f"成功测试案例 {page_title} 最佳实践",
+                f"稳定测试策略 验证方法 {page_title}"
+            ],
+            'innovative': [
+                f"创新测试方法 {page_title} 未覆盖测试点",
+                f"边界测试 异常场景 {page_title} 探索性测试",
+                f"新颖测试路径 发现潜在问题 {page_title}"
+            ],
+            'balanced': [
+                f"综合测试策略 {page_title} 全面覆盖",
+                f"平衡探索与验证 {page_title} 测试规划",
+                f"多维度测试分析 {page_title} 系统性方法"
+            ],
+            'risk_focused': [
+                f"风险导向测试 {page_title} 安全漏洞",
+                f"边界条件测试 极端场景 {page_title}",
+                f"错误处理测试 异常情况 {page_title}"
+            ]
+        }
+        
+        return base_queries.get(exploration_strategy, base_queries['balanced'])
+    
+    def get_decision_enhancement_context(self, decision_mode: str) -> str:
+        """
+        🎯 根据决策模式生成增强上下文
+        """
+        context_templates = {
+            'conservative': """
+## 🛡️ 保守决策模式激活
+**决策原则**：
+- 优先选择历史上成功率高的动作类型
+- 基于已验证的测试路径进行决策
+- 最小化测试风险，确保稳定推进
+- 重点验证核心功能和关键路径
+
+**适用场景**：关键功能验证、稳定性测试、回归测试
+""",
+            'exploratory': """
+## 🚀 探索决策模式激活
+**决策原则**：
+- 优先尝试历史上较少执行的动作类型
+- 勇于探索新的测试路径和功能点
+- 适当承担测试风险以获得新发现
+- 关注未覆盖的功能区域和边界条件
+
+**适用场景**：功能探索、边界测试、创新路径发现
+""",
+            'balanced': """
+## ⚖️ 平衡决策模式激活
+**决策原则**：
+- 在稳健测试和探索创新之间找到平衡
+- 根据页面重要性动态调整策略
+- 综合考虑测试覆盖率和风险控制
+- 兼顾验证已知功能和发现新功能
+
+**适用场景**：综合测试、功能验证与探索并重
+"""
+        }
+        
+        return context_templates.get(decision_mode, context_templates['balanced'])
+    
+    def update_diversity_metrics(self, action_taken: str, exploration_strategy: str, decision_mode: str):
+        """
+        📈 更新多样性指标
+        """
+        self.exploration_history.append({
+            'action': action_taken,
+            'exploration_strategy': exploration_strategy,
+            'decision_mode': decision_mode,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+        # 保持历史记录在合理范围内
+        if len(self.exploration_history) > 50:
+            self.exploration_history = self.exploration_history[-50:]
+    
+    def get_diversity_stats(self) -> Dict[str, Any]:
+        """
+        📊 获取多样性统计信息
+        """
+        return {
+            'action_diversity_score': self.action_diversity_score,
+            'exploration_strategies_usage': dict(self.exploration_strategies_used),
+            'decision_modes_usage': dict(self.decision_modes_used),
+            'total_explorations': len(self.exploration_history),
+            'current_weights': {
+                'exploration': dict(self.exploration_strategy_weights),
+                'decision': dict(self.decision_mode_weights)
+            }
+        }
+
+
 class DualModelSystem:
     """
     🚀 双模型协作系统 - R1探索 + QwQ决策
@@ -1015,6 +1260,9 @@ class DualModelSystem:
     
     def __init__(self, params, knowledge_bases=None, verbose=False):
         self.verbose = verbose
+        
+        # 🎲 初始化多样性跟踪器
+        self.diversity_tracker = DiversityTracker(verbose=verbose)
         
         # 🚀 RAG知识库系统 - 接收外部传递的知识库实例
         if knowledge_bases:
@@ -1062,6 +1310,7 @@ class DualModelSystem:
             print(f"   📡 R1探索模型: {r1_params['model']}")
             print(f"   ⚡ QwQ决策模型: {qwq_params['model']}")
             print(f"   🧠 RAG增强: {'启用' if knowledge_bases else '禁用'}")
+            print(f"   🎲 多样性跟踪器: 已启用")
     
     def reset_for_new_test(self):
         """重置双模型系统状态"""
@@ -1102,61 +1351,99 @@ class DualModelSystem:
     def r1_explore_state(self, page_title: str, action_list: list, page_context: str, 
                         history_str: str, html: str = "") -> Dict[str, Any]:
         """
-        🔍 R1模型深度探索新状态 - 增强版：结合RAG知识进行全面分析
+        🔍 R1模型深度探索新状态 - 多样性增强版：智能策略选择 + RAG知识增强
         
         返回探索结果字典，包含：
         - analysis: 页面分析
         - strategy: 测试策略
         - recommendations: 推荐动作
         - risk_areas: 风险区域
+        - exploration_strategy: 使用的探索策略
         """
         self.exploration_count += 1
         
-        # 🚀 R1探索的RAG增强 - 面向页面分析的知识检索
-        if self.verbose:
-            print(f"🔍 开始为R1探索收集RAG知识...")
+        # 🎯 智能选择探索策略
+        exploration_strategy = self.diversity_tracker.select_exploration_strategy()
         
-        # 1. 检索专业web测试知识 - 帮助R1理解测试最佳实践
+        # 🚀 多样性增强的RAG知识检索
+        if self.verbose:
+            print(f"🔍 R1探索 #{self.exploration_count} - 策略: {exploration_strategy}")
+            print(f"   开始收集多样化RAG知识...")
+        
+        # 1. 基于探索策略的多样化专业知识检索
         professional_knowledge = ""
         if self.retriever:
             try:
-                knowledge_query = f"页面测试分析 {page_title} 功能测试 风险识别"
-                professional_knowledge = self.retriever.retrieve(knowledge_query)
+                # 获取策略相关的多样化查询
+                strategy_queries = self.diversity_tracker.get_exploration_enhancement_queries(page_title, exploration_strategy)
+                
+                # 随机选择2个查询以增加多样性
+                selected_queries = random.sample(strategy_queries, k=min(2, len(strategy_queries)))
+                
+                combined_knowledge = []
+                for query in selected_queries:
+                    knowledge = self.retriever.retrieve(query)
+                    if knowledge:
+                        combined_knowledge.append(f"=== {query} ===\n{knowledge}")
+                
+                professional_knowledge = "\n\n".join(combined_knowledge)
+                
                 if self.verbose and professional_knowledge:
-                    print(f"   📚 获取专业知识: {len(professional_knowledge)} 字符")
+                    print(f"   📚 获取专业知识: {len(professional_knowledge)} 字符 (策略: {exploration_strategy})")
             except Exception as e:
                 if self.verbose:
                     print(f"   ⚠️ 专业知识检索失败: {e}")
         
-        # 2. 检索相似页面状态分析经验 - 帮助R1借鉴类似页面的分析
+        # 2. 检索相似页面状态分析经验（增加反向学习）
         similar_states_context = ""
         if self.state_kb:
             try:
                 similar_states_context = self.state_kb.retrieve_similar_states(
                     page_title, len(action_list), k=2
                 )
+                
+                # 🎲 20%概率添加失败案例学习（如果有的话）
+                if random.random() < 0.2 and self.thinking_kb:
+                    failure_query = f"测试失败 错误案例 {page_title} 避免重复"
+                    failure_experience = self.thinking_kb.retrieve_relevant_thinking(failure_query, k=1)
+                    if failure_experience:
+                        similar_states_context += f"\n\n=== 失败案例反向学习 ===\n{failure_experience}"
+                
                 if self.verbose and similar_states_context:
                     print(f"   📊 获取相似状态: {len(similar_states_context)} 字符")
             except Exception as e:
                 if self.verbose:
                     print(f"   ⚠️ 相似状态检索失败: {e}")
         
-        # 3. 检索历史页面分析推理经验 - 帮助R1学习分析思路
+        # 3. 检索历史分析经验（多角度查询）
         analysis_experience = ""
         if self.thinking_kb:
             try:
-                thinking_query = f"页面功能分析 {page_title} 测试策略 风险评估"
+                # 基于探索策略的多样化思维查询
+                thinking_queries = {
+                    'conservative': f"稳健分析 成功经验 {page_title} 测试策略",
+                    'innovative': f"创新思路 新颖方法 {page_title} 探索发现",
+                    'balanced': f"全面分析 平衡策略 {page_title} 综合考虑", 
+                    'risk_focused': f"风险分析 边界测试 {page_title} 安全考量"
+                }
+                
+                thinking_query = thinking_queries.get(exploration_strategy, thinking_queries['balanced'])
                 analysis_experience = self.thinking_kb.retrieve_relevant_thinking(thinking_query, k=2)
+                
                 if self.verbose and analysis_experience:
                     print(f"   🧠 获取分析经验: {len(analysis_experience)} 字符")
             except Exception as e:
                 if self.verbose:
                     print(f"   ⚠️ 分析经验检索失败: {e}")
         
+        # 🎨 获取多样性反馈
+        action_history = [item.get('action', '') for item in self.diversity_tracker.exploration_history]
+        diversity_feedback = self.diversity_tracker.get_diversity_feedback(action_history)
+        
         # 🔍 RAG增强状态报告
         if self.verbose:
             rag_sources = []
-            if professional_knowledge: rag_sources.append("专业知识✓")
+            if professional_knowledge: rag_sources.append("策略知识✓")
             if similar_states_context: rag_sources.append("相似状态✓")
             if analysis_experience: rag_sources.append("分析经验✓")
             
@@ -1178,7 +1465,45 @@ class DualModelSystem:
                 details = f"{i}. [其他] {getattr(action, 'text', 'Unknown')}"
             action_details.append(details)
         
-        # 🎯 构建RAG增强的R1探索prompt
+        # 🌟 构建策略导向的探索策略提示
+        strategy_guidance = {
+            'conservative': """
+## 🛡️ 保守探索策略激活
+**分析重点**：
+- 重点分析核心功能和主要用户流程
+- 基于成功经验识别关键测试点
+- 评估功能稳定性和可靠性
+- 制定渐进式验证策略
+""",
+            'innovative': """
+## 🚀 创新探索策略激活  
+**分析重点**：
+- 寻找未被充分测试的功能区域
+- 探索非常规的用户交互路径
+- 识别潜在的创新测试机会
+- 设计突破性的测试方法
+""",
+            'balanced': """
+## ⚖️ 平衡探索策略激活
+**分析重点**：
+- 综合考虑稳定性和创新性
+- 平衡深度验证和广度探索
+- 兼顾已知功能和未知风险
+- 制定全面的测试策略
+""",
+            'risk_focused': """
+## ⚠️ 风险导向探索策略激活
+**分析重点**：
+- 专注识别潜在的安全风险点
+- 分析边界条件和异常场景
+- 评估错误处理和容错能力
+- 设计风险探测测试方案
+"""
+        }
+        
+        current_strategy_guidance = strategy_guidance.get(exploration_strategy, strategy_guidance['balanced'])
+        
+        # 🎯 构建多样性增强的R1探索prompt
         exploration_prompt = f"""
 {professional_knowledge}
 
@@ -1186,10 +1511,14 @@ class DualModelSystem:
 
 {analysis_experience}
 
-🔍 **R1深度探索任务** - 探索编号 #{self.exploration_count}
+{diversity_feedback}
 
-你是一位资深的Web测试专家，需要对当前页面进行深度分析和测试策略制定。
-请充分利用上述专业知识、相似页面经验和历史分析经验来指导你的分析。
+{current_strategy_guidance}
+
+🔍 **R1深度探索任务** - 探索编号 #{self.exploration_count} | 策略: {exploration_strategy.upper()}
+
+你是一位资深的Web测试专家，正在使用 **{exploration_strategy}** 探索策略对当前页面进行深度分析。
+请充分利用上述专业知识、相似页面经验、历史分析经验和多样性反馈来指导你的分析。
 
 ## 页面信息
 {page_context}
@@ -1198,47 +1527,54 @@ class DualModelSystem:
 ## 可用交互元素 ({len(action_list)}个)
 {chr(10).join(action_details)}
 
-## 📋 深度探索任务
-请基于专业知识和历史经验，进行全面的页面分析：
+## 📋 策略导向的深度探索任务
+基于 **{exploration_strategy}** 策略，请进行以下分析：
 
-### 1. **页面功能深度分析**
-- 基于专业知识，分析页面的主要功能和技术特点
-- 结合相似页面经验，识别页面在用户流程中的作用
-- 评估页面的复杂度和测试优先级
+### 1. **策略化页面功能分析**
+- 根据{exploration_strategy}策略，深度分析页面的核心功能和技术特点
+- 识别与当前策略最匹配的功能区域和测试机会
+- 评估页面复杂度和测试优先级（策略导向）
 
-### 2. **智能测试策略制定**  
-- 基于web测试最佳实践，制定针对性测试策略
-- 参考历史分析经验，确定关键验证点
-- 设计多层次的测试路径（正常流程、边界情况、异常场景）
+### 2. **多样性测试策略制定**  
+- 基于当前多样性状态，制定针对性测试策略
+- 参考历史经验和专业知识，确定关键验证点
+- 设计多层次测试路径：
+  * **{exploration_strategy}导向路径**：符合当前策略的主要测试方向
+  * **多样性补充路径**：增强测试覆盖面的辅助方向
+  * **创新探索路径**：尝试新的测试角度和方法
 
-### 3. **专业风险识别**
-- 利用专业知识识别潜在的技术风险点
-- 基于相似页面经验预测可能的问题区域
-- 评估业务逻辑和用户体验风险
+### 3. **智能风险识别与机会发现**
+- 利用专业知识和{exploration_strategy}策略识别风险点
+- 基于相似页面经验预测问题区域
+- 发现潜在的测试机会和未覆盖区域
 
-### 4. **动作优先级智能建议**
-请从现有的{len(action_list)}个动作中，基于专业分析确定优先级：
-- **高价值动作** (索引和专业理由)
-- **风险探测动作** (索引和风险分析)
-- **完整性验证动作** (索引和验证目标)
+### 4. **策略化动作优先级建议**
+请从现有{len(action_list)}个动作中，基于{exploration_strategy}策略确定优先级：
+- **策略优先动作** (索引和{exploration_strategy}理由)
+- **多样性增强动作** (索引和多样性分析)
+- **风险探测动作** (索引和风险评估)
+- **创新探索动作** (索引和创新价值)
 
-### 5. **测试数据专业建议**
-基于web测试经验，为输入字段建议：
-- **功能验证数据** (正常业务场景)
-- **边界值测试数据** (长度、格式、特殊字符)
-- **安全性测试数据** (注入、XSS等安全风险)
+### 5. **多样化测试数据建议**
+基于{exploration_strategy}策略和web测试经验，为输入字段建议：
+- **策略导向数据** (符合{exploration_strategy}的测试数据)
+- **多样性测试数据** (增加测试覆盖面的数据)
+- **边界探索数据** (边界值和异常情况)
+- **安全测试数据** (安全漏洞检测数据)
 
-### 6. **探索策略总结**
-基于当前分析，总结：
-- 本页面的测试重点和难点
-- 与相似页面的差异和特殊注意事项
-- 后续探索的方向建议
+### 6. **策略化探索总结与进化建议**
+基于{exploration_strategy}策略和当前分析，总结：
+- 本页面在{exploration_strategy}策略下的测试重点和难点
+- 与历史相似页面的差异和特殊注意事项
+- 策略执行效果评估和调整建议
+- 后续探索方向和策略进化建议
 
-请提供结构化且专业的分析结果，这将指导后续的精确测试执行。
+**重要提醒**：请充分体现{exploration_strategy}策略的特色，同时考虑多样性增强和测试覆盖的全面性。
+提供结构化且具有策略针对性的专业分析结果，这将指导后续的精确测试执行。
 """
         
         if self.verbose:
-            print(f"🔍 R1开始深度探索状态 #{self.exploration_count}: {page_title[:30]}...")
+            print(f"🔍 R1开始{exploration_strategy}策略探索 #{self.exploration_count}: {page_title[:30]}...")
         
         try:
             exploration_result = self.r1_explorer.chat_with_thinking(exploration_prompt)
@@ -1254,92 +1590,138 @@ class DualModelSystem:
                 "analysis": analysis_content,
                 "reasoning": reasoning_process,
                 "action_count": len(action_list),
-                "exploration_prompt": exploration_prompt[:800] + "...",  # 保存部分prompt用于调试
+                "exploration_strategy": exploration_strategy,  # 新增：记录使用的策略
+                "diversity_score": self.diversity_tracker.action_diversity_score,  # 新增：多样性分数
+                "exploration_prompt": exploration_prompt[:800] + "...",
                 "model": "DeepSeek-R1",
-                "rag_enhanced": True,  # 标记使用了RAG增强
+                "rag_enhanced": True,
+                "strategy_enhanced": True,  # 新增：策略增强标记
                 "knowledge_sources": {
                     "professional_knowledge": len(professional_knowledge) > 0,
                     "similar_states": len(similar_states_context) > 0,
-                    "analysis_experience": len(analysis_experience) > 0
+                    "analysis_experience": len(analysis_experience) > 0,
+                    "diversity_feedback": len(diversity_feedback) > 0
                 }
             }
             
             if self.verbose:
-                print(f"✅ R1探索完成 #{self.exploration_count} (RAG增强)")
+                print(f"✅ R1{exploration_strategy}探索完成 #{self.exploration_count}")
                 print(f"   📝 分析长度: {len(analysis_content)} 字符")
                 print(f"   🧠 推理长度: {len(reasoning_process)} 字符")
-                print(f"   🚀 RAG来源: 专业知识✓ 相似状态✓ 分析经验✓")
+                print(f"   🎯 策略: {exploration_strategy}")
+                print(f"   🎲 多样性分数: {self.diversity_tracker.action_diversity_score:.2f}")
             
             return exploration_data
             
         except Exception as e:
             if self.verbose:
-                print(f"❌ R1探索失败 #{self.exploration_count}: {e}")
+                print(f"❌ R1{exploration_strategy}探索失败 #{self.exploration_count}: {e}")
             
             # 返回基础探索结果
             return {
                 "exploration_id": self.exploration_count,
                 "page_title": page_title,
                 "timestamp": datetime.now().isoformat(),
-                "analysis": f"RAG增强探索过程中出现错误: {str(e)}",
+                "analysis": f"策略增强探索过程中出现错误: {str(e)}",
                 "reasoning": "",
                 "action_count": len(action_list),
+                "exploration_strategy": exploration_strategy,
                 "model": "DeepSeek-R1",
                 "rag_enhanced": False,
+                "strategy_enhanced": False,
                 "error": str(e)
             }
     
     def qwq_decide_action(self, action_list: list, exploration_data: Dict[str, Any], 
                          page_context: str, history_str: str) -> tuple:
         """
-        ⚡ QwQ模型基于R1探索结果快速决策 - 增强版：结合RAG经验进行精准决策
+        ⚡ QwQ模型基于R1探索结果快速决策 - 多样性增强版：智能决策模式 + RAG经验增强
         
         返回: (action_output, reasoning)
         """
-        # 提取R1的关键建议
+        # 提取R1的关键建议和策略信息
         r1_analysis = exploration_data.get("analysis", "")
         r1_reasoning = exploration_data.get("reasoning", "")
+        r1_strategy = exploration_data.get("exploration_strategy", "balanced")
         
-        # 🚀 QwQ决策的RAG增强 - 面向执行决策的知识检索
+        # 🎯 智能选择决策模式
+        decision_mode = self.diversity_tracker.select_decision_mode()
+        
+        # 🚀 多样性增强的RAG知识检索
         if self.verbose:
-            print(f"⚡ 开始为QwQ决策收集RAG知识...")
+            print(f"⚡ QwQ决策 - 模式: {decision_mode} | R1策略: {r1_strategy}")
+            print(f"   开始收集多样化决策知识...")
         
-        # 1. 检索R1历史探索洞察 - 帮助QwQ理解类似探索的决策模式
+        # 1. 基于决策模式的历史探索洞察检索
         exploration_insights = ""
         if self.exploration_kb:
             try:
-                insights_query = f"页面决策 {exploration_data.get('page_title', '')} 动作选择 测试执行"
+                # 基于决策模式的多样化洞察查询
+                insights_queries = {
+                    'conservative': f"成功决策案例 稳健选择 {exploration_data.get('page_title', '')} 验证",
+                    'exploratory': f"创新决策 探索路径 {exploration_data.get('page_title', '')} 发现",
+                    'balanced': f"平衡决策 综合策略 {exploration_data.get('page_title', '')} 执行"
+                }
+                
+                insights_query = insights_queries.get(decision_mode, insights_queries['balanced'])
                 exploration_insights = self.exploration_kb.retrieve_exploration_insights(insights_query, k=2)
+                
                 if self.verbose and exploration_insights:
-                    print(f"   🔍 获取探索洞察: {len(exploration_insights)} 字符")
+                    print(f"   🔍 获取探索洞察: {len(exploration_insights)} 字符 (模式: {decision_mode})")
             except Exception as e:
                 if self.verbose:
                     print(f"   ⚠️ 探索洞察检索失败: {e}")
         
-        # 2. 检索相似页面的决策经验 - 帮助QwQ借鉴成功的决策案例
+        
+        # 2. 检索相似页面的决策经验（多样性导向）
         similar_decisions = ""
         if self.state_kb:
             try:
                 similar_decisions = self.state_kb.retrieve_similar_states(
                     exploration_data.get('page_title', ''), len(action_list), k=2
                 )
+                
+                # 🎲 基于决策模式添加特定类型的经验
+                if decision_mode == 'exploratory' and random.random() < 0.3:
+                    # 探索模式：30%概率加入失败但有价值的尝试经验
+                    if self.thinking_kb:
+                        risk_query = f"失败尝试 有价值发现 {exploration_data.get('page_title', '')} 学习"
+                        risk_experience = self.thinking_kb.retrieve_relevant_thinking(risk_query, k=1)
+                        if risk_experience:
+                            similar_decisions += f"\n\n=== 探索失败但有价值的经验 ===\n{risk_experience}"
+                
                 if self.verbose and similar_decisions:
                     print(f"   📊 获取决策经验: {len(similar_decisions)} 字符")
             except Exception as e:
                 if self.verbose:
                     print(f"   ⚠️ 决策经验检索失败: {e}")
         
-        # 3. 检索历史执行决策推理 - 帮助QwQ学习决策思路
+        # 3. 检索历史执行决策推理（模式导向）
         decision_experience = ""
         if self.thinking_kb:
             try:
-                decision_query = f"动作选择 {exploration_data.get('page_title', '')} 执行决策 测试策略"
+                # 基于决策模式的多样化决策查询
+                decision_queries = {
+                    'conservative': f"稳健决策 成功执行 {exploration_data.get('page_title', '')} 验证",
+                    'exploratory': f"探索决策 创新尝试 {exploration_data.get('page_title', '')} 发现",
+                    'balanced': f"平衡决策 综合考虑 {exploration_data.get('page_title', '')} 执行"
+                }
+                
+                decision_query = decision_queries.get(decision_mode, decision_queries['balanced'])
                 decision_experience = self.thinking_kb.retrieve_relevant_thinking(decision_query, k=2)
+                
                 if self.verbose and decision_experience:
                     print(f"   🧠 获取决策推理: {len(decision_experience)} 字符")
             except Exception as e:
                 if self.verbose:
                     print(f"   ⚠️ 决策推理检索失败: {e}")
+        
+        # 🎨 获取决策增强上下文
+        decision_enhancement = self.diversity_tracker.get_decision_enhancement_context(decision_mode)
+        
+        # 📊 计算动作历史多样性
+        action_history = [item.get('action', '') for item in self.diversity_tracker.exploration_history]
+        diversity_feedback = self.diversity_tracker.get_diversity_feedback(action_history)
         
         # 🔍 RAG增强状态报告
         if self.verbose:
@@ -1353,13 +1735,36 @@ class DualModelSystem:
             else:
                 print(f"   ⚠️ 未获取到RAG增强数据，使用基础决策模式")
         
-        # 构建动作列表
-        action_list_str = "\n".join([
-            f"{i}. {self.format_action_simple(action)}" 
-            for i, action in enumerate(action_list)
-        ])
+        # 构建动作列表（增加多样性分析）
+        action_analysis = []
+        action_types_count = {}
         
-        # 🎯 构建RAG增强的QwQ决策prompt
+        for i, action in enumerate(action_list):
+            action_simple = self.format_action_simple(action)
+            action_type = action_simple.split()[0] if action_simple else "Unknown"
+            action_types_count[action_type] = action_types_count.get(action_type, 0) + 1
+            
+            # 计算该动作类型在历史中的使用频率
+            historical_usage = sum(1 for hist_action in action_history if hist_action.startswith(action_type))
+            usage_indicator = "🔥" if historical_usage > 3 else "🆕" if historical_usage == 0 else "📊"
+            
+            action_analysis.append(f"{i}. {action_simple} {usage_indicator}")
+        
+        action_list_str = "\n".join(action_analysis)
+        
+        # 🌟 构建决策模式导向的多样性分析
+        diversity_analysis = f"""
+## 🎲 当前多样性状态分析
+- **多样性分数**: {self.diversity_tracker.action_diversity_score:.2f}/1.0
+- **可用动作类型**: {dict(action_types_count)}
+- **历史使用频率**: 🔥频繁 📊适中 🆕未使用
+- **决策模式**: {decision_mode.upper()}
+- **R1探索策略**: {r1_strategy.upper()}
+
+{diversity_feedback}
+"""
+        
+        # 🎯 构建多样性增强的QwQ决策prompt
         decision_prompt = f"""
 {exploration_insights}
 
@@ -1367,68 +1772,90 @@ class DualModelSystem:
 
 {decision_experience}
 
-⚡ **QwQ智能决策任务**
+{decision_enhancement}
 
-基于R1模型的深度探索分析和历史决策经验，请做出最优的动作选择。
-请充分利用上述探索洞察、相似决策经验和历史推理来指导你的决策。
+{diversity_analysis}
+
+⚡ **QwQ智能决策任务** - 决策模式: {decision_mode.upper()}
+
+基于R1模型的{r1_strategy}策略探索分析和历史决策经验，使用{decision_mode}决策模式做出最优选择。
+请充分利用上述探索洞察、相似决策经验、历史推理和多样性分析来指导你的决策。
 
 ## 当前状态
 {page_context}
 {history_str}
 
-## R1深度探索分析
+## R1深度探索分析（策略: {r1_strategy}）
 {r1_analysis[:1000]}...
 
-## 可选动作 ({len(action_list)}个)
+## 可选动作分析 ({len(action_list)}个)
 {action_list_str}
 
-## 🎯 智能决策要求
-基于R1的专业分析和历史经验，选择当前最合适的动作：
+## 🎯 {decision_mode.upper()}模式智能决策
+基于{decision_mode}决策模式、R1的{r1_strategy}策略分析和多样性状态，选择当前最合适的动作：
 
-### 决策优先级
-1. **R1高价值推荐** - 优先考虑R1明确推荐的高价值动作
-2. **历史成功经验** - 参考相似场景下的成功决策模式
-3. **风险规避策略** - 避免历史上证明有风险的动作类型
-4. **测试完整性** - 确保测试覆盖的全面性和系统性
+### 决策优先级框架
+1. **模式导向优先级** - 符合{decision_mode}模式的决策原则
+2. **R1策略契合度** - 与R1的{r1_strategy}策略分析的一致性
+3. **多样性增强价值** - 对提升测试多样性的贡献
+4. **历史经验指导** - 相似场景下的成功经验参考
+5. **风险收益平衡** - 测试价值与执行风险的权衡
 
-### 决策考虑因素
-- **功能验证**: 当前动作是否能有效验证核心功能
-- **探索价值**: 动作是否能带来新的有价值信息
-- **执行风险**: 基于历史经验评估动作的风险程度
-- **测试进度**: 考虑当前测试的整体进度和覆盖情况
+### 多样性决策考虑因素
+- **动作类型多样性**: 选择历史使用较少的动作类型 (🆕 > 📊 > 🔥)
+- **探索路径创新**: 尝试与历史路径不同的测试方向
+- **功能覆盖均衡**: 平衡不同功能区域的测试覆盖
+- **策略模式协调**: {decision_mode}模式与{r1_strategy}策略的最佳结合
+
+### {decision_mode.upper()}模式特定指导
+根据{decision_mode}决策模式：
+- **Conservative模式**: 优先选择历史成功率高、风险可控的动作
+- **Exploratory模式**: 勇于尝试新路径、未使用的动作类型
+- **Balanced模式**: 在稳健验证和创新探索之间找到最佳平衡点
 
 ### 输出要求
 **严格按照以下格式输出**：
 - 点击动作：直接返回数字，如 "3"
 - 输入动作：返回"数字:文本"，如 "5:test@example.com"
 
+### 决策说明（简短）
+在一行内简要说明选择理由，格式：
+"{decision_mode}模式-{action_type}-理由"
+
 **决策原则**：
-- 基于R1的专业分析和历史经验
-- 选择测试价值最高、风险最可控的动作
-- 确保决策的准确性和执行的有效性
+- 基于{decision_mode}模式的特定优势和R1的{r1_strategy}策略洞察
+- 优化测试多样性和覆盖面
+- 确保决策的创新性和执行效果
 
 请基于上述全面分析快速做出精准决策，只返回动作索引或"索引:文本"格式。
 """
         
         if self.verbose:
-            print(f"⚡ QwQ开始智能决策...")
+            print(f"⚡ QwQ开始{decision_mode}模式智能决策...")
         
         try:
             decision_result = self.qwq_decider.chat_with_thinking(decision_prompt)
             qwq_output = decision_result["content"]
             qwq_reasoning = decision_result["reasoning"]
             
+            # 🎲 更新多样性追踪
+            action_taken = f"{decision_mode}决策模式选择"
+            self.diversity_tracker.update_diversity_metrics(
+                action_taken, r1_strategy, decision_mode
+            )
+            
             if self.verbose:
-                print(f"⚡ QwQ决策输出: {qwq_output}")
+                print(f"⚡ QwQ{decision_mode}决策输出: {qwq_output}")
                 print(f"🧠 QwQ推理: {qwq_reasoning[:100]}...")
-                print(f"🚀 RAG来源: 探索洞察✓ 决策经验✓ 推理经验✓")
+                print(f"🎯 模式: {decision_mode} | R1策略: {r1_strategy}")
+                print(f"🎲 多样性分数: {self.diversity_tracker.action_diversity_score:.2f}")
             
             return qwq_output, qwq_reasoning
             
         except Exception as e:
             if self.verbose:
-                print(f"❌ QwQ决策失败: {e}")
-            return None, f"RAG增强决策错误: {str(e)}"
+                print(f"❌ QwQ{decision_mode}决策失败: {e}")
+            return None, f"多样性增强决策错误: {str(e)}"
     
     def format_action_simple(self, action) -> str:
         """简化的动作格式化"""
@@ -1442,13 +1869,20 @@ class DualModelSystem:
             return f"操作 '{getattr(action, 'text', 'Unknown')}'"
     
     def get_dual_model_stats(self) -> dict:
-        """获取双模型系统统计"""
+        """获取双模型系统统计（包含多样性信息）"""
+        diversity_stats = self.diversity_tracker.get_diversity_stats()
+        
         return {
             "total_explorations": self.exploration_count,
             "cached_states": len(self.explored_states),
             "cache_size": len(self.state_exploration_cache),
             "r1_session_id": self.r1_explorer.session_id[:8],
-            "qwq_session_id": self.qwq_decider.session_id[:8]
+            "qwq_session_id": self.qwq_decider.session_id[:8],
+            # 🎲 多样性统计
+            "diversity_metrics": diversity_stats,
+            "current_diversity_score": diversity_stats.get('action_diversity_score', 0.0),
+            "exploration_strategies_usage": diversity_stats.get('exploration_strategies_usage', {}),
+            "decision_modes_usage": diversity_stats.get('decision_modes_usage', {})
         }
 
 
@@ -2166,6 +2600,11 @@ class rag_llm_agent(Agent):
                 model_info = "🔍R1+⚡QwQ" if is_new_state else "⚡QwQ"
                 if self.verbose:
                     print(f"✅ {model_info}选择 [{action_index}]: {action_description}")
+                    # 🎲 显示多样性统计
+                    diversity_stats = self.dual_model_system.get_dual_model_stats()
+                    print(f"🎲 多样性分数: {diversity_stats['current_diversity_score']:.2f}")
+                    print(f"🎯 探索策略使用: {diversity_stats['exploration_strategies_usage']}")
+                    print(f"⚡ 决策模式使用: {diversity_stats['decision_modes_usage']}")
                 else:
                     print(f"Action [{action_index}]: {self.format_action_info(selected_action)} ({model_info})")
                 
@@ -2458,37 +2897,74 @@ class rag_llm_agent(Agent):
 
 
 def main():
-    """🚀 双模型协作RAG Agent测试 - R1探索 + QwQ决策"""
+    """🚀 多样性增强双模型协作RAG Agent测试 - R1智能探索 + QwQ多样性决策"""
     # 测试参数
     test_params = {
         "api_key": "sk-esaaumvchjupuotzcybqofgbiuqbfmhwpvfwiyefacxznnpz",
         "embedding_token": "sk-esaaumvchjupuotzcybqofgbiuqbfmhwpvfwiyefacxznnpz",
-        "app_name": "Dual Model Web Testing",
+        "app_name": "Enhanced Dual Model Web Testing",
         "verbose": True,  # 测试时启用详细输出
         "max_tokens": 1024,  # 基础配置，会被各模型覆盖
         "temperature": 0.7,
         "clear_rag_on_init": True,
         "clear_thinking_on_init": True,
         "clear_state_on_init": True,
-        "clear_exploration_on_init": True,  # 新增：清理探索知识库
-        "reset_dual_model_on_init": True,  # 新增：重置双模型系统
+        "clear_exploration_on_init": True,
+        "reset_dual_model_on_init": True,
     }
 
-    print("🚀 双模型协作RAG Agent - R1探索 + QwQ决策")
-    print("=" * 60)
+    print("🚀 多样性增强双模型协作RAG Agent - R1智能探索 + QwQ多样性决策")
+    print("=" * 70)
     
     try:
         # 测试Agent初始化
         agent = rag_llm_agent(test_params)
-        print("✓ 双模型Agent初始化成功")
+        print("✓ 多样性增强双模型Agent初始化成功")
         
-        # 测试双模型系统统计
+        # 🎲 测试多样性跟踪器功能
+        diversity_tracker = agent.dual_model_system.diversity_tracker
+        print("\n🎲 多样性跟踪器测试:")
+        
+        # 测试探索策略选择
+        for i in range(5):
+            strategy = diversity_tracker.select_exploration_strategy()
+            print(f"  🎯 探索策略选择 #{i+1}: {strategy}")
+        
+        # 测试决策模式选择
+        for i in range(5):
+            mode = diversity_tracker.select_decision_mode()
+            print(f"  ⚡ 决策模式选择 #{i+1}: {mode}")
+        
+        # 测试多样性分析
+        sample_actions = ["点击登录", "输入用户名", "点击搜索", "选择选项", "点击登录", "输入密码"]
+        diversity_score = diversity_tracker.calculate_action_diversity(sample_actions)
+        print(f"  📊 样本动作多样性分数: {diversity_score:.2f}")
+        
+        diversity_feedback = diversity_tracker.get_diversity_feedback(sample_actions)
+        print(f"  📝 多样性反馈: {diversity_feedback.strip()}")
+        
+        # 🚀 测试增强查询生成
+        print("\n🔍 增强查询生成测试:")
+        for strategy in ['conservative', 'innovative', 'balanced', 'risk_focused']:
+            queries = diversity_tracker.get_exploration_enhancement_queries("登录页面", strategy)
+            print(f"  🎯 {strategy}策略查询: {queries[0][:50]}...")
+        
+        # ⚡ 测试决策增强上下文
+        print("\n⚡ 决策增强上下文测试:")
+        for mode in ['conservative', 'exploratory', 'balanced']:
+            context = diversity_tracker.get_decision_enhancement_context(mode)
+            print(f"  🎯 {mode}模式: {context[:100].replace(chr(10), ' ')}...")
+        
+        # 测试双模型系统统计（包含多样性信息）
         stats = agent.dual_model_system.get_dual_model_stats()
-        print(f"✓ 双模型系统状态:")
+        print(f"\n✓ 增强双模型系统状态:")
         print(f"  📡 R1会话ID: {stats['r1_session_id']}")
         print(f"  ⚡ QwQ会话ID: {stats['qwq_session_id']}")
         print(f"  📊 探索次数: {stats['total_explorations']}")
         print(f"  💾 缓存状态: {stats['cached_states']}")
+        print(f"  🎲 当前多样性分数: {stats['current_diversity_score']:.2f}")
+        print(f"  🎯 探索策略使用: {stats['exploration_strategies_usage']}")
+        print(f"  ⚡ 决策模式使用: {stats['decision_modes_usage']}")
         
         # 测试重置功能
         original_r1_session = stats['r1_session_id']
@@ -2501,53 +2977,89 @@ def main():
             original_r1_session != new_stats['r1_session_id'] and
             original_qwq_session != new_stats['qwq_session_id']
         )
-        print(f"✓ 重置测试: {'Success' if reset_success else 'Failed'}")
+        print(f"\n✓ 重置测试: {'Success' if reset_success else 'Failed'}")
         
-        # 测试双模型架构特性
-        print("\n🚀 双模型协作架构特性:")
-        print("┌─────────────────────────────────────────────────┐")
-        print("│  🔍 R1模型 (DeepSeek-R1)                       │")
-        print("│  ├─ 职责: 新状态深度探索分析                   │")
-        print("│  ├─ 特点: 2048 tokens, 高温度(0.8)            │")
-        print("│  └─ 输出: 页面分析、测试策略、风险识别         │")
-        print("│                                                 │")
-        print("│  ⚡ QwQ模型 (Qwen/QwQ-32B-Preview)              │")
-        print("│  ├─ 职责: 基于R1分析快速决策                   │")
-        print("│  ├─ 特点: 512 tokens, 低温度(0.3)             │")
-        print("│  └─ 输出: 具体动作选择                         │")
-        print("└─────────────────────────────────────────────────┘")
+        # 展示增强架构特性
+        print("\n🚀 多样性增强双模型协作架构:")
+        print("┌─────────────────────────────────────────────────────────────┐")
+        print("│  🎲 多样性跟踪器 (DiversityTracker)                        │")
+        print("│  ├─ 智能策略选择: 4种探索策略动态平衡                      │")
+        print("│  ├─ 多样性决策: 3种决策模式自适应切换                      │")
+        print("│  ├─ 实时监控: 动作多样性分数实时计算                       │")
+        print("│  └─ 反馈优化: 基于使用频率动态调整权重                     │")
+        print("│                                                             │")
+        print("│  🔍 增强R1模型 (DeepSeek-R1)                               │")
+        print("│  ├─ 策略导向探索: 基于选定策略的深度分析                   │")
+        print("│  ├─ 多样化RAG检索: 策略相关的多角度知识获取                │")
+        print("│  ├─ 反向学习: 20%概率加入失败案例学习                      │")
+        print("│  └─ 输出: 策略化页面分析、多样性测试建议                   │")
+        print("│                                                             │")
+        print("│  ⚡ 增强QwQ模型 (Qwen/QwQ-32B-Preview)                      │")
+        print("│  ├─ 模式导向决策: 基于选定模式的智能选择                   │")
+        print("│  ├─ 多样性分析: 动作类型使用频率实时评估                   │")
+        print("│  ├─ 历史优化: 优先选择较少使用的动作类型                   │")
+        print("│  └─ 输出: 多样性优化的具体动作选择                         │")
+        print("└─────────────────────────────────────────────────────────────┘")
         
-        print("\n🔄 工作流程:")
-        print("1. 🔍 状态检测 → 生成页面状态签名")
-        print("2. 🆕 新状态? → R1深度探索 → 存储到探索知识库")
-        print("3. ⚡ QwQ决策 → 基于R1分析快速选择动作")
-        print("4. 🔄 已知状态 → 直接QwQ决策(利用缓存)")
+        print("\n🔄 增强工作流程:")
+        print("1. 🎲 多样性评估 → 分析当前测试多样性状态")
+        print("2. 🎯 策略选择 → 智能选择R1探索策略 (conservative/innovative/balanced/risk_focused)")
+        print("3. 🔍 策略探索 → R1基于策略进行多样化RAG增强深度分析")
+        print("4. 💾 知识存储 → 探索结果存储到ExplorationKB")
+        print("5. ⚡ 模式决策 → QwQ选择决策模式 (conservative/exploratory/balanced)")
+        print("6. 🎨 多样性决策 → 基于多样性分析和历史使用频率智能选择动作")
+        print("7. 📊 反馈更新 → 更新多样性指标和策略权重")
         
-        print("\n📚 四层知识库系统:")
-        print("• 🔍 ExplorationKB: R1探索结果专用存储")
-        print("• 📊 StateKB: 页面状态和交互历史")
-        print("• 🧠 ThinkingKB: 模型推理过程记录")
-        print("• 📖 RetrieverKB: 专业测试知识文档")
+        print("\n📚 增强四层知识库系统:")
+        print("• 🔍 ExplorationKB: R1策略化探索结果 + 多样性洞察")
+        print("• 📊 StateKB: 页面状态 + 多样性决策历史")
+        print("• 🧠 ThinkingKB: 模型推理 + 失败案例反向学习")
+        print("• 📖 RetrieverKB: 专业知识 + 策略导向多样化检索")
         
-        print("\n💡 系统优势:")
-        print("🎯 精准探索: R1模型专注深度分析新状态")
-        print("⚡ 快速决策: QwQ模型基于分析结果高效执行")
-        print("💰 成本优化: 避免重复探索，大幅降低token消耗")
-        print("🔄 智能缓存: 已知状态复用探索结果")
-        print("🛡️ 容错机制: 多层回退保障系统稳定")
+        print("\n🎯 多样性增强策略:")
+        print("🔄 **探索策略 (R1)**:")
+        print("  • Conservative: 基于成功经验的稳健探索")
+        print("  • Innovative: 寻找未测试区域的创新探索")
+        print("  • Balanced: 稳定性与创新性的平衡探索")
+        print("  • Risk-focused: 专注边界和风险的导向探索")
         
-        print("\n" + "=" * 60)
-        print("✅ 双模型协作系统测试完成!")
-        print("\n🚀 核心创新:")
-        print("• 🔍 R1专注探索: 只在新状态时激活，深度分析")
-        print("• ⚡ QwQ专注决策: 快速响应，降低延迟")
-        print("• 💾 智能缓存: 避免重复探索，显著节省成本")
-        print("• 📚 知识增强: 四层RAG系统提供全面上下文")
-        print("• 🎨 自适应: 根据状态新旧程度动态选择策略")
-        print("\n💡 现在运行 python main.py 体验双模型协作!")
+        print("\n⚡ **决策模式 (QwQ)**:")
+        print("  • Conservative: 优选历史成功率高的安全动作")
+        print("  • Exploratory: 勇于尝试新路径和未使用动作")
+        print("  • Balanced: 稳健验证与创新探索的最佳平衡")
+        
+        print("\n💡 核心创新亮点:")
+        print("🎯 **智能策略选择**: 动态平衡4种探索策略，避免单一模式")
+        print("🎲 **多样性驱动**: 实时监控测试多样性，优化动作选择")
+        print("📊 **使用频率优化**: 🆕优于📊优于🔥，鼓励尝试新动作类型")
+        print("🔄 **自适应权重**: 基于使用频率动态调整策略权重")
+        print("🧠 **反向学习**: 从失败案例中学习，避免重复错误")
+        print("⚖️ **策略协调**: R1探索策略与QwQ决策模式的智能配合")
+        
+        print("\n🚀 性能优势:")
+        print("💰 **成本效率**: 智能缓存 + 策略化探索大幅降低token消耗")
+        print("🎨 **测试覆盖**: 多样性驱动显著提升测试路径覆盖面")
+        print("🔍 **深度洞察**: 策略导向的RAG检索提供更精准的专业指导")
+        print("⚡ **响应速度**: 模式化决策加速动作选择过程")
+        print("🛡️ **系统稳定**: 多层回退机制保障极端情况下的可用性")
+        
+        print("\n" + "=" * 70)
+        print("✅ 多样性增强双模型协作系统测试完成!")
+        print("\n🌟 系统特色总结:")
+        print("• 🎲 **智能多样性**: 首个集成多样性跟踪的Web测试AI系统")
+        print("• 🎯 **策略化探索**: R1模型的4种探索策略自适应选择")
+        print("• ⚡ **模式化决策**: QwQ模型的3种决策模式动态平衡")
+        print("• 📊 **实时优化**: 基于使用频率的动态权重调整机制")
+        print("• 🧠 **经验学习**: 成功案例 + 失败案例的双向学习能力")
+        print("• 🚀 **RAG增强**: 四层知识库的策略导向检索系统")
+        
+        print(f"\n🎉 现在运行 python main.py 体验多样性增强的智能Web测试!")
+        print(f"🔥 期待看到 {stats['exploration_strategies_usage']} 策略和 {stats['decision_modes_usage']} 模式的协作效果!")
             
     except Exception as e:
         print(f"✗ Test failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
