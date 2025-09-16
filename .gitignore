@@ -1,0 +1,109 @@
+# 凭据和敏感信息
+agent/github_credentials.py
+**/credentials.py
+**/secrets.py
+*.env
+.env
+.env.local
+.env.*.local
+
+# API密钥和配置
+api_keys.json
+config/local_settings.py
+
+# Python缓存和编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+
+# IDE配置文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# 日志文件
+*.log
+logs/
+
+# 数据库文件
+*.sqlite
+*.sqlite3
+*.db
+
+# 测试覆盖率
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# 向量存储和知识库数据
+thinking_vectorstore/
+vectorstore/
+*.chroma
+
+# 测试输出
+webtest_output/result/
+webtest_output/temp/
+test_results/
+
+# 模型文件
+*.model
+*.pkl
+*.pickle
+
+# 临时文件
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Chrome驱动文件（大文件，不应提交到仓库）
+driver/chrome-win/
+driver/chromedriver*
+driver/chrome*
+# 排除所有大的二进制文件
+*.exe
+*.dll
+*.dylib
+*.so
